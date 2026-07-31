@@ -11,7 +11,12 @@ Format: one entry per ambiguity, added as we encounter it.
 | 1 | whole paper | **The robot is never named.** No model, no DoF count, no simulator anywhere in the text (verified against the full PDF). | **Unitree G1, 29 DoF** (`g1_29dof_rev_1_0.urdf`), box object, MuJoCo. Inferred via ref [6] DynaRetarget — see `paper_notes.md` §1 for the evidence chain. | `configs/robots/` |
 | 2 | §II-G | Paper uses acados (KSO) + Hippo (TO); Hippo is closed-source. | Ipopt for all three stages. Mode/edge matches the paper exactly; KSO/TO solve times will differ (interior-point vs SQP) — compare feasibility verdicts, not wall-clock. | `configs/solvers/` |
 | 3 | §II-C 1 | Friction coefficients μ (linear) and μ_t (torsional) are never given. | To be set at Milestone 2; note the paper specifies a **pyramidal** friction approximation, so the constraint stays linear in force. | `configs/scenes/` |
-| 4 | §II-C 1 | Patch half-extents `h` for hands/feet/box faces are never given. | Derive from the G1 URDF foot geometry and the box dimensions at Milestone 2. | `configs/scenes/` |
+| 4 | §II-C 1 | Patch half-extents `h` for hands/feet/box faces are never given. | **Feet: derived from the URDF, not guessed** — the G1's foot collision model is 4 spheres (r=0.005) at x∈{-0.05,+0.12}, y∈{-0.025,+0.03}, z=-0.03, giving a sole rectangle `h=(0.085, 0.03)` centred at (0.035, 0, -0.035). Box faces follow from the box size. | `configs/scenes/` |
+| 5 | §II-D (Eq. 14) | The nominal pose that Eq. 14 regularizes toward is never given, yet it determines *which* solution the NLP finds. | A lightly crouched stance with the leg pitch chain summing to ~0 so the soles stay flat. | `configs/robots/g1.yaml` → `nominal_configuration` |
+| 6 | §IV-B | Box dimensions and mass are never given. | 0.30 m cube, 2.0 kg, starting on the floor at x=0.45. Width chosen so the ±y faces sit inside the G1's hand span. | `configs/scenes/` → `objects.box` |
+| 7 | §II-C 1 | Palm patch geometry. Unlike the feet, the G1's `*_rubber_hand` links carry **no collision geometry at all** — only a visual mesh — so there is nothing to read a palm patch off. | Authored estimate: `h=(0.035, 0.02)` (~0.07×0.04 m palm), palms facing inward. | `configs/scenes/` → `patches.left_palm` |
+| 8 | §II-C 1 | **Patch normal sign convention is never stated.** | Local `+z` = outward normal (away from the owning body). Contact is then face-to-face with **anti-parallel** z-axes, so Eq. 7a's alignment residual must include that flip. Revisit when Eq. 7a is written. | `faro/core/patches.py` |
+| 9 | §IV-B | Platform ("tabletop") dimensions and height. | 0.60×0.60 m at z=0.40, at x=0.9. | `configs/scenes/` → `patches.tabletop` |
 
 ## Environment gotchas discovered (not paper ambiguities, but worth remembering)
 

@@ -84,7 +84,7 @@ as that milestone is built.
 | # | Milestone | Script | Status |
 |---|---|---|---|
 | 0 | Environment & scaffolding | `00_check_install.py` | **done** — 17/17 checks pass |
-| 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | not started |
+| 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | **done** — 30/30 tests pass, branching factor 108 reproduced |
 | 2 | Shared constraints (Eqs. 7–13) | — (tests only) | not started |
 | 3 | Mode/edge feasibility (Eq. 14) | `02_mode_edge_demo.py` | not started |
 | 4 | KSO (Eq. 15) | `03_kso_demo.py` | not started |
@@ -103,6 +103,32 @@ Meshcat (browser 3D viz) · acados (optional, later)
 **Unitree G1, 29 DoF** (`g1_29dof_rev_1_0.urdf`, floating base: nq=36, nv=35),
 manipulating a box. The paper never names its robot — see
 [docs/paper_notes.md](docs/paper_notes.md) §1 for how this was established.
+
+## Milestone 1 — what to look for in the viewer
+
+```bash
+conda activate faro
+python scripts/01_load_and_visualize_robot.py --mode sweep
+```
+
+Forward port **7000** in VS Code, open `http://127.0.0.1:7000/static/`.
+
+Check these five things — each one is a convention that Milestone 2 will build on:
+
+1. **Feet on the floor, not hovering or sunk.** The green sole patches sit exactly on
+   `z = 0`. The G1's sole is 0.035 m below its ankle frame, so placing the robot by the
+   ankle would leave it floating.
+2. **Every red normal stub points outward.** Soles point *down*, palms point *inward at
+   each other*, box faces point *away* from the box, floor and platform point *up*.
+   A stub pointing into its own body is the bug this visualization exists to catch.
+3. **Green sole patches match the real foot outline** — longer forward (+x) than back,
+   because the sole spans x ∈ [-0.05, +0.12] in the URDF.
+4. **The orange box patches move with the box**, the green robot patches move with the
+   joints during the sweep, and the blue floor/platform never move.
+5. **The box is out of arm's reach** from the standing pose. That is intentional (see
+   below), not a misconfigured scene.
+
+Console output should end with `Raw branching factor: 108`.
 
 ## Open paper ambiguities
 

@@ -1,0 +1,52 @@
+# Unitree G1, 29 DoF -- the robot used by the FARO paper.
+#
+# The paper never names its robot (see docs/paper_notes.md section 1 for how this
+# was established via reference [6], DynaRetarget). Swapping robots means pointing
+# `scene.robot` at a different file here; no module code changes.
+#
+# The plain 29-DoF URDF is used rather than `g1_29dof_with_hand_rev_1_0.urdf`
+# (43 DoF): FARO models every end-effector as a rectangular contact patch
+# (Section II-C 1), never as an articulated gripper, so the 14 finger DoF would add
+# NLP cost with no modelling benefit.
+
+name: g1_29dof
+
+# erd:// resolves inside $CONDA_PREFIX/share/example-robot-data/robots/
+urdf: "erd://g1_description/urdf/g1_29dof_rev_1_0.urdf"
+
+# Loaded with a free-flyer root => nq=36, nv=35, 29 actuated joints.
+# The 6 unactuated base DoF are exactly why contact forces are needed at all.
+
+# --------------------------------------------------------------------------------
+# Nominal / reference posture.
+#
+# AMBIGUITY (docs/ambiguities.md #5): the paper never states its nominal pose, but
+# Eq. 14 regularizes toward one, so this choice directly affects which solutions the
+# mode/edge NLP finds. It is a tuning knob, not a fact.
+#
+# Chosen: a slightly crouched stance with the leg pitch chain summing to ~0, so the
+# foot soles stay parallel to the floor (hip_pitch + knee + ankle_pitch ~= 0).
+# Values in RADIANS.
+# --------------------------------------------------------------------------------
+nominal_configuration:
+  # legs: -0.20 + 0.42 - 0.23 = -0.01 ~= 0  => soles stay flat
+  left_hip_pitch_joint: -0.20
+  left_knee_joint: 0.42
+  left_ankle_pitch_joint: -0.23
+  right_hip_pitch_joint: -0.20
+  right_knee_joint: 0.42
+  right_ankle_pitch_joint: -0.23
+
+  # arms: brought slightly forward and inward, a plausible pre-grasp posture
+  left_shoulder_pitch_joint: 0.25
+  left_shoulder_roll_joint: 0.20
+  left_elbow_joint: 0.90
+  right_shoulder_pitch_joint: 0.25
+  right_shoulder_roll_joint: -0.20
+  right_elbow_joint: 0.90
+
+# Frames used to drop the base to the ground when building the standing posture.
+# Purely kinematic: this does NOT check static balance.
+ground_contact_frames:
+  - left_ankle_roll_link
+  - right_ankle_roll_link

@@ -117,37 +117,119 @@ write this if we actually hit a wall.
 Meshcat runs a small web server on the cluster node and you view it in a browser
 on your laptop. VS Code Remote makes this nearly automatic.
 
-**Start the viewer** (any FARO script that opens Meshcat, e.g. Milestone 1's
-`scripts/01_load_and_visualize_robot.py`). It prints something like:
+**You do not need to work any of this out yourself.** Every FARO script that opens a
+viewer detects where it is running and prints instructions with the real hostname,
+username, Slurm node and port already filled in — ready to copy and paste. Nothing
+is hard-coded, because the Slurm node changes on every allocation.
+
+Just run the script and read the box it prints.
+
+### One-time setup on a cluster (recommended)
+
+A compute node cannot know how *your laptop* reaches the cluster: the address that
+works from outside is usually not one visible from inside (gateways, VPNs, and
+`~/.ssh/config` aliases). Tell FARO your alias once:
+
+```bash
+conda env config vars set FARO_SSH_GATEWAY=mlp1 -n faro
+conda activate faro   # re-activate for it to take effect
+```
+
+Use whatever `Host` name you already `ssh` to. With that set, the printed command is
+exactly right, e.g.:
 
 ```
-You can open the visualizer by visiting the following URL:
-http://127.0.0.1:7000/static/
+ssh -N -L 7000:crannog04:7000 mlp1
 ```
 
-**Then:**
+Without it, FARO falls back to reverse-resolving the SSH entry point, which is
+usually right but occasionally names a gateway you do not normally use.
 
-1. In VS Code (connected to the cluster over Remote-SSH), open the **PORTS** panel
-   — next to TERMINAL, or `Ctrl+Shift+P` → *"Ports: Focus on Ports View"*.
-2. VS Code usually auto-detects port `7000` and forwards it. If not, click
-   **Forward a Port** and enter `7000`.
-3. Click the 🌐 globe icon next to the forwarded port, or open
-   `http://127.0.0.1:7000/static/` in your **local** browser.
+### What the script prints
+
+**Running locally** — no tunnel, no forwarding:
+
+```
+==============================================================================
+  OPEN THIS:  http://127.0.0.1:7000/static/
+==============================================================================
+  Running locally -- no tunnel or port forwarding needed.
+```
+
+Add `--open` to launch the browser automatically (ignored on a remote session).
+
+**Running on a cluster** — the options it can prove will work, best first:
+
+```
+  [1] SSH TUNNEL -- run this on YOUR LAPTOP and leave it open:
+        ssh -N -L 7000:crannog04:7000 mlp1
+     then open:  http://127.0.0.1:7000/static/
+
+  [2] Direct access will NOT work: crannog04.inf.ed.ac.uk resolves only to a
+        private address, so no VPN makes it routable from your laptop.
+
+  [3] VS Code TUNNELS is active on this host. ...
+```
+
+Note option 2: FARO resolves the node's address and, when it is private
+(RFC 1918, e.g. `192.168.x.x`), says so instead of offering a URL that cannot work.
+
+### The three situations, and why they differ
+
+| Situation | How the browser reaches the viewer |
+|---|---|
+| **Local machine** | Directly — `http://127.0.0.1:<port>/static/`. |
+| **Remote-SSH** | VS Code forwards to your laptop's `127.0.0.1`. PORTS panel → forward the port. |
+| **VS Code Tunnels** (`code tunnel`) | Ports come out on a `*.devtunnels.ms` URL, **not** `127.0.0.1`. Click the 🌐 globe in the PORTS panel and **append `/static/`**. If blank, right-click → **Port Visibility → Public**, since Meshcat needs a WebSocket. |
+
+An SSH tunnel (option 1) works in all remote cases and has no auth or WebSocket
+restrictions, which is why it is listed first.
 
 You should get a dark 3D viewport with a grid and axis triad.
 
 ### Notes and gotchas
 
-- **Always use `http://127.0.0.1:7000/static/` locally**, not the cluster's
-  hostname. The forwarding tunnel maps your laptop's `localhost:7000` to the
-  cluster's `localhost:7000`.
-- **The trailing `/static/` is required.** `http://127.0.0.1:7000/` alone shows
-  nothing useful.
+- **The trailing `/static/` is mandatory — this is the most common trap.**
+  Meshcat routes `/` to a *WebSocket* handler, so a normal browser request to the
+  bare origin returns:
+
+  ```
+  HTTP 400   Can "Upgrade" only to "WebSocket".
+  ```
+
+  That error means **your tunnel is working perfectly** — you reached the server and
+  merely asked for the wrong path. Add `/static/`:
+
+  | URL | Result |
+  |---|---|
+  | `http://127.0.0.1:7000/` | ❌ `Can "Upgrade" only to "WebSocket".` |
+  | `http://127.0.0.1:7000/static/` | ✅ the viewer |
+
+  This bites especially with VS Code's 🌐 globe icon, which opens the bare origin.
 - **Keep the Python process alive.** The Meshcat server dies with the script, and
   the browser goes blank. Our demo scripts hold the process open at the end for
   this reason.
-- **Port already in use** (a leftover viewer from an earlier run): pass a
-  different port, or clean up with `pkill -f meshcat`.
+- **Port already in use — the most common cause of "I see nothing".** Meshcat scans
+  upward from 7000 and offers **no way to request a port**, so a leftover server
+  from a killed script silently pushes the new one onto 7001. If you then forward
+  7000, you are looking at the *old, empty* viewer. Every script prints the port it
+  actually got; trust that banner, not the default.
+
+  Clean up orphaned viewers (safe — it only kills servers whose parent script has
+  already exited, never one another terminal is using):
+
+  ```bash
+  python scripts/01_load_and_visualize_robot.py --kill-stale
+  ```
+
+  To see what is holding the ports:
+
+  ```bash
+  python -c "from faro.viz.meshcat_ports import find_meshcat_servers as f; [print(s) for s in f()]"
+  ```
+
+  Note each meshcat server binds **two** ports: ZeroMQ on 6000+ and HTTP on 7000+.
+  You forward the HTTP one.
 - **Compute nodes vs login node.** If you `srun` onto a compute node, VS Code
   forwards ports from the node your Remote-SSH session is attached to. Simplest
   path for Milestones 1–4: run the interactive/visual scripts on whichever node

@@ -1,0 +1,126 @@
+# Box-placement scene -- the paper's tree-search evaluation task (Fig. 4, Table IV).
+#
+#   "The feasibility-guided tree search is evaluated on two box-placement tasks ...
+#    In both tasks, the objective is to place the white box on the platform."
+#
+# The interfaces at the bottom of this file reproduce Table IV exactly.
+
+name: box_placement
+robot: g1
+gravity: 9.81
+
+# ================================================================================
+# Movable objects (paper Eq. 5b / Eq. 11 -- own pose, own dynamics, NOT part of the
+# robot model).
+# ================================================================================
+objects:
+  box:
+    # AMBIGUITY (docs/ambiguities.md #6): the paper never gives box dimensions or
+    # mass. Chosen so the +y/-y faces sit at y = +-0.15, which matches the G1's
+    # natural hand separation (~0.152 m) for a two-handed grasp.
+    half_extents: [0.15, 0.15, 0.15]   # a 0.30 m cube
+    mass: 2.0                           # kg
+    initial_position: [0.45, 0.0, 0.15] # resting on the floor, in front of the robot
+    # Only the faces Table IV actually references, plus `top` for visualization.
+    faces: [front, rear, left, right, top, bottom]
+
+# ================================================================================
+# Contact patches.
+#
+# Convention (ours; the paper does not state a sign): a patch's local +z is its
+# OUTWARD normal -- pointing away from the body it belongs to, into free space.
+# Two patches in contact are face-to-face, so their z-axes are ANTI-parallel.
+# Eq. 7a's alignment residual must account for that flip (Milestone 2).
+#
+# Box face patches are generated automatically from the box geometry, so only the
+# robot and environment patches are declared here.
+# ================================================================================
+patches:
+
+  # ---- robot end-effectors ------------------------------------------------------
+  # Foot soles. These half-extents are REAL, read off the G1 URDF: the foot's
+  # collision model is 4 spheres of radius 0.005 at
+  #   x in {-0.05, +0.12}, y in {-0.025, +0.03}, z = -0.03
+  # in `*_ankle_roll_link`. So the sole rectangle spans x in [-0.05, 0.12] (length
+  # 0.17, centre 0.035) and y in [-0.03, 0.03], on the plane z = -0.035
+  # (sphere centre -0.03 minus radius 0.005).
+  # rpy_deg [180, 0, 0] turns the patch's +z to point DOWN, out of the foot.
+  left_foot_sole:
+    attachment: robot
+    parent: left_ankle_roll_link
+    translation: [0.035, 0.0, -0.035]
+    rpy_deg: [180.0, 0.0, 0.0]
+    half_extents: [0.085, 0.03]
+  right_foot_sole:
+    attachment: robot
+    parent: right_ankle_roll_link
+    translation: [0.035, 0.0, -0.035]
+    rpy_deg: [180.0, 0.0, 0.0]
+    half_extents: [0.085, 0.03]
+
+  # Palms.
+  # AMBIGUITY (docs/ambiguities.md #7): unlike the feet, the G1's `*_rubber_hand`
+  # links carry NO collision geometry at all -- only a visual mesh. There is nothing
+  # in the URDF to read a palm patch off, and the paper gives no half-extents, so
+  # these are authored estimates for a ~0.07 x 0.04 m palm.
+  # The palms face INWARD (toward each other) so the hands can pinch the box's
+  # +y / -y faces: left palm normal -y => rpy_deg [90,0,0]; right palm +y => [-90,0,0].
+  left_palm:
+    attachment: robot
+    parent: left_rubber_hand
+    translation: [0.045, -0.015, 0.0]
+    rpy_deg: [90.0, 0.0, 0.0]
+    half_extents: [0.035, 0.02]
+  right_palm:
+    attachment: robot
+    parent: right_rubber_hand
+    translation: [0.045, 0.015, 0.0]
+    rpy_deg: [-90.0, 0.0, 0.0]
+    half_extents: [0.035, 0.02]
+
+  # ---- environment --------------------------------------------------------------
+  # Fixed in the world; placement IS the world placement. Normal +z (up), no flip.
+  floor:
+    attachment: environment
+    parent: world
+    translation: [0.0, 0.0, 0.0]
+    rpy_deg: [0.0, 0.0, 0.0]
+    half_extents: [3.0, 3.0]
+
+  # The "platform" of Fig. 4 -- the goal surface for the box.
+  # AMBIGUITY: dimensions and height are not given by the paper.
+  tabletop:
+    attachment: environment
+    parent: world
+    translation: [0.9, 0.0, 0.40]
+    rpy_deg: [0.0, 0.0, 0.0]
+    half_extents: [0.30, 0.30]
+
+# ================================================================================
+# Interfaces -- paper Table IV, "Allowed contact interactions".
+#
+#   Left hand  | box left, box front, free
+#   Right hand | box right, box rear, free
+#   Left foot  | floor, free
+#   Right foot | floor, free
+#   Box bottom | floor, tabletop, free
+#
+# `free` is implicit and always available (Section II-A), so it is not listed.
+# Face naming is in the world frame: front=+x, rear=-x, left=+y, right=-y.
+# ================================================================================
+interfaces:
+  left_hand:
+    patch: left_palm
+    allowed: [box_left, box_front]
+  right_hand:
+    patch: right_palm
+    allowed: [box_right, box_rear]
+  left_foot:
+    patch: left_foot_sole
+    allowed: [floor]
+  right_foot:
+    patch: right_foot_sole
+    allowed: [floor]
+  box_bottom:
+    patch: box_bottom
+    allowed: [floor, tabletop]
