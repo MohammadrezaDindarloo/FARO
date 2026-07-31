@@ -1,0 +1,38 @@
+# Default NLP solver settings, used by mode/edge (Eq. 14), KSO (Eq. 15) and TO (Eq. 17).
+#
+# This file exists at Milestone 0 to fix the *pattern*: solver choice is data, not
+# code. `faro/solvers/` will expose a backend-agnostic interface, so switching to
+# acados later means pointing at a different config -- not editing any module.
+#
+# NOTE: these are sensible starting values, NOT paper values. The paper uses Hippo
+# and does not report Ipopt settings. Everything here is a knob to tune, especially
+# for TO (Milestone 5), where convergence is expected to need work.
+
+backend: ipopt        # one of: ipopt | acados (acados not implemented yet)
+
+ipopt:
+  # --- convergence ---
+  tol: 1.0e-6              # primal-dual tolerance
+  constr_viol_tol: 1.0e-6  # a "feasible" answer must actually satisfy the constraints
+  acceptable_tol: 1.0e-4   # relaxed tolerance, used with acceptable_iter below
+  acceptable_iter: 10
+  max_iter: 3000
+
+  # --- linear solver ---
+  # mumps ships with the conda-forge build. ma27/ma57 (HSL) are faster on the
+  # larger TO problems but need a separate licensed download.
+  linear_solver: mumps
+
+  # --- output ---
+  print_level: 0           # 0 = silent; raise to 5 to watch convergence while debugging
+  sb: "yes"                # suppress the Ipopt banner
+
+  # --- robustness ---
+  # Ipopt's automatic scaling. FARO mixes positions (m), angles (rad) and forces (N)
+  # in one problem, so scaling matters a lot; revisit at Milestone 5.
+  nlp_scaling_method: gradient-based
+  mu_strategy: adaptive
+  hessian_approximation: exact   # switch to limited-memory if exact Hessians are too slow
+
+casadi:
+  print_time: false

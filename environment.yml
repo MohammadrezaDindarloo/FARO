@@ -1,0 +1,61 @@
+# FARO conda environment.
+#
+#   conda env create -f environment.yml     (or `conda env update -f environment.yml`)
+#
+# Everything here comes from conda-forge as a prebuilt binary. There is deliberately
+# no source build in this file -- see SETUP.md for why, and for the one optional
+# exception (acados, Milestone 5+).
+name: faro
+
+channels:
+  - conda-forge
+
+dependencies:
+  # Python 3.11: the version the existing `faro` env already has, and the one with
+  # the widest wheel/package coverage across pinocchio + mujoco + casadi right now.
+  - python=3.11
+
+  # ---------------------------------------------------------------------------
+  # Symbolic modelling + NLP solving. The backbone of every optimization problem
+  # in FARO (mode/edge Eq. 14, KSO Eq. 15, TO Eq. 17).
+  # ---------------------------------------------------------------------------
+  - casadi>=3.7            # symbolic expressions + autodiff + NLP frontend
+  - ipopt>=3.14            # interior-point NLP solver (with MUMPS linear solver)
+
+  # ---------------------------------------------------------------------------
+  # Robot kinematics / dynamics.
+  # NOTE: the conda-forge `pinocchio` build depends on `casadi`, i.e. it ships the
+  # `pinocchio.casadi` module. That is what lets us write kinematics as symbolic
+  # CasADi expressions instead of numeric ones -- non-negotiable for this project.
+  # ---------------------------------------------------------------------------
+  - pinocchio>=4.1         # kinematics, Jacobians, centroidal momentum (Eq. 10), RNEA
+  - coal                   # GJK/EPA collision, witness points + normal (Eq. 9)
+  - example-robot-data     # ready-made URDFs+meshes (Panda, Solo, Talos, ...)
+
+  # ---------------------------------------------------------------------------
+  # Simulation + visualization.
+  # ---------------------------------------------------------------------------
+  - mujoco>=3.8            # metapackage; pulls mujoco-python bindings
+  - meshcat-python>=0.3.2  # browser 3D viewer, works over VS Code port forwarding
+
+  # ---------------------------------------------------------------------------
+  # Scientific stack / tooling.
+  # ---------------------------------------------------------------------------
+  - numpy
+  - scipy
+  - matplotlib
+  - pyyaml                 # configs/
+  - tqdm
+  - rich                   # readable console output in the demo scripts
+
+  # ---------------------------------------------------------------------------
+  # Dev.
+  # ---------------------------------------------------------------------------
+  - pytest
+  - ipython
+  - jupyterlab             # notebooks/ (optional, for library exploration)
+  - pip
+
+  - pip:
+      # Milestone 7 only (LLM contact-plan sampling). Pure-python, no build.
+      - openai>=1.40

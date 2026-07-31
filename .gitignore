@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- FARO ---
+results/
+outputs/
+assets/cache/
+*.mp4
+*.png
+!docs/**/*.png
+.env

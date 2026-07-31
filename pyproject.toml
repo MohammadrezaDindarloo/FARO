@@ -1,0 +1,21 @@
+# Makes `faro` an importable package via `pip install -e .`, so that every script in
+# scripts/ and every test in tests/ can `import faro` without sys.path hacks.
+#
+# Dependencies are intentionally NOT listed here: they are all conda-forge binaries
+# managed by environment.yml. Listing them here too would tempt pip into "fixing"
+# a conda-installed pinocchio/casadi with an incompatible wheel.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faro"
+version = "0.0.1"
+description = "Feasibility-Aware Robot motion Optimization -- from-scratch reimplementation"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["faro*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
