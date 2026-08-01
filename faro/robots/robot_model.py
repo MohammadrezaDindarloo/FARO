@@ -164,10 +164,10 @@ class RobotModel:
 
     # ------------------------------------------------------------------ limits
     def joint_limits(self) -> tuple[np.ndarray, np.ndarray]:
-        """(lower, upper) configuration limits, paper Eq. 12.
+        """(lower, upper) configuration limits, paper Eq. 13a.
 
         Returned over the full nq, including the meaningless floating-base entries;
-        callers that enforce Eq. 12 must slice off the first 7. Kept whole here so
+        callers that enforce Eq. 13a must slice off the first 7. Kept whole here so
         the indexing matches q exactly and nobody has to guess an offset.
         """
         return self.model.lowerPositionLimit.copy(), self.model.upperPositionLimit.copy()

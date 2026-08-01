@@ -58,7 +58,7 @@ def test_build_configuration_rejects_unknown_joint(robot: RobotModel):
 
 
 def test_nominal_configuration_respects_joint_limits(robot: RobotModel):
-    """The Eq. 14 regularization target must itself satisfy Eq. 12."""
+    """The Eq. 14 regularization target must itself satisfy Eq. 13a."""
     lower, upper = robot.joint_limits()
     q = robot.q_nominal
     # Skip the 7 floating-base entries, whose "limits" are meaningless.
@@ -213,13 +213,38 @@ def test_foot_sole_half_extents_match_the_urdf_collision_spheres(scene: Scene):
     assert sole.placement.translation == pytest.approx([0.035, 0.0, -0.035])
 
 
-def test_palms_face_each_other(scene: Scene):
-    """For a two-handed grasp the palms must face inward, not outward.
+def test_hand_patches_point_along_the_forearm(scene: Scene):
+    """The paper cuts the hand off at the wrist and puts the patch on the cut face.
 
-    Left palm normal along -y, right palm along +y, in each hand's own frame.
+    So the contact normal runs ALONG THE FOREARM (+x of the wrist-yaw link), not
+    sideways out of a palm. The robot therefore presses the box's +y/-y faces
+    between the ends of its two forearms rather than pinching with palms, which is
+    what Figs. 1, 4 and 5 show. Both arms use the same local normal; it is the arm
+    posture, not the patch, that aims them at each other.
     """
-    assert scene.patches["left_palm"].normal_local == pytest.approx([0, -1, 0], abs=1e-12)
-    assert scene.patches["right_palm"].normal_local == pytest.approx([0, 1, 0], abs=1e-12)
+    for name in ("left_hand_patch", "right_hand_patch"):
+        assert scene.patches[name].normal_local == pytest.approx([1, 0, 0], abs=1e-12), (
+            f"{name}: the wrist cut face must look out along the forearm"
+        )
+
+
+def test_hand_patch_geometry_comes_from_the_urdf_cut_plane(scene: Scene):
+    """The cut is where the hand bolts on, and the patch is that cross-section.
+
+    `*_hand_palm_joint` sits at x = 0.0415 in the wrist-yaw link, so removing the
+    hand leaves exactly that plane. The wrist-yaw collision mesh's section there
+    spans y in [-0.0238, +0.0299] and z in [-0.0304, +0.0299]. Unlike the old
+    authored palm, these are measured numbers -- so they must not drift.
+    """
+    for name, sign in (("left_hand_patch", +1.0), ("right_hand_patch", -1.0)):
+        patch = scene.patches[name]
+        assert patch.parent.endswith("wrist_yaw_link")
+        assert patch.half_extents == pytest.approx((0.0269, 0.0301), abs=1e-6)
+        assert patch.placement.translation == pytest.approx([0.0415, sign * 0.003, 0.0], abs=1e-9)
+
+    # Not square, and taller than wide -- the asymmetry Eq. 7b must respect per axis.
+    hx, hy = scene.patches["left_hand_patch"].half_extents
+    assert hy > hx
 
 
 def test_box_rests_on_the_floor(scene: Scene):
@@ -236,16 +261,19 @@ def test_environment_patches_have_upward_normals(scene: Scene):
 
 
 def test_box_is_narrower_than_the_nominal_hand_separation(scene: Scene):
-    """A two-handed side grasp needs the box's +y/-y faces INSIDE the palms' span.
+    """A two-handed side grasp needs the box's +y/-y faces INSIDE the arms' span.
 
-    If the box were wider than the arms rest apart, the palms would have to splay
-    outward rather than close inward, and the inward-facing palm normals asserted in
-    `test_palms_face_each_other` would be the wrong convention for this task.
+    If the box were wider than the arms rest apart, the forearms would have to splay
+    outward rather than close inward, and Table IV's "left hand -> box left" could
+    never be realised without stepping around the box.
+
+    Measured at the wrist contact patches, since the paper cuts the hand off there
+    (docs/ambiguities.md #7b) -- the `*_rubber_hand` frame no longer exists.
     """
     box = scene.objects["box"]
     q = scene.robot.q_nominal
-    left = scene.robot.frame_placement(q, "left_rubber_hand").translation[1]
-    right = scene.robot.frame_placement(q, "right_rubber_hand").translation[1]
+    left = scene.patch_world_placement(scene.patches["left_hand_patch"], q).translation[1]
+    right = scene.patch_world_placement(scene.patches["right_hand_patch"], q).translation[1]
     half_span = abs(left - right) / 2.0
     assert box.half_extents[1] < half_span, (
         f"box half-width {box.half_extents[1]} exceeds hand half-separation {half_span:.3f}"
@@ -255,18 +283,21 @@ def test_box_is_narrower_than_the_nominal_hand_separation(scene: Scene):
 def test_box_is_out_of_static_arm_reach_so_the_base_must_move(scene: Scene):
     """Documents a real property of this scene, and why Eq. 14 optimizes over the base.
 
-    The G1's shoulder-to-hand distance is ~0.41 m, but the box's side face sits
-    ~0.47 m from the shoulder at the nominal standing pose. So NO arm-only posture
-    reaches the box: the mode/edge NLP (Eq. 14) must translate the floating base --
-    which it can, because q includes the base. This is a feature of the paper's
-    loco-manipulation setting, not a misconfigured scene.
+    The G1's shoulder-to-contact-patch distance is ~0.37 m, but the box's side face
+    sits ~0.47 m from the shoulder at the nominal standing pose. So NO arm-only
+    posture reaches the box: the mode/edge NLP (Eq. 14) must translate the floating
+    base -- which it can, because q includes the base. This is a feature of the
+    paper's loco-manipulation setting, not a misconfigured scene.
+
+    Cutting the hand off at the wrist (docs/ambiguities.md #7b) shortened the arm by
+    ~3.4 cm, so the gap this documents got WIDER, not narrower.
 
     If someone later "fixes" this by moving the box closer, this test fails and
     forces the question of whether the task still exercises locomotion at all.
     """
     robot, q = scene.robot, scene.robot.q_nominal
     shoulder = robot.frame_placement(q, "left_shoulder_pitch_link").translation
-    hand = robot.frame_placement(q, "left_rubber_hand").translation
+    hand = scene.patch_world_placement(scene.patches["left_hand_patch"], q).translation
     arm_length = float(np.linalg.norm(hand - shoulder))
 
     box_face = scene.patch_world_placement(scene.patches["box_left"]).translation

@@ -100,8 +100,15 @@ def report_scene(scene: Scene, q: np.ndarray) -> None:
 
     robot = scene.robot
     print("Key frame placements at the standing pose (world):")
-    for frame in ["pelvis", "left_ankle_roll_link", "right_ankle_roll_link",
-                  "left_rubber_hand", "right_rubber_hand"]:
+    # The arms end at `*_wrist_yaw_link`: the paper cuts the hand off at the wrist and
+    # puts the contact patch on the cut face, so `*_rubber_hand` no longer exists
+    # (docs/ambiguities.md #7b/#7c). Derived from the scene rather than hard-coded, so
+    # moving a patch to a different link cannot leave this list stale again.
+    hand_links = sorted(
+        scene.patches[iface.patch.name].parent
+        for name, iface in scene.interfaces.items() if "hand" in name
+    )
+    for frame in ["pelvis", "left_ankle_roll_link", "right_ankle_roll_link", *hand_links]:
         t = robot.frame_placement(q, frame).translation
         print(f"  {frame:<24} {np.array2string(t, precision=4, suppress_small=True)}")
 
@@ -216,9 +223,9 @@ def run_interactive(vis: SceneVisualizer, scene: Scene, q0: np.ndarray) -> None:
         idx = robot.model.joints[robot.model.getJointId(name)].idx_q
         lower, upper = robot.joint_limits()
         if not (lower[idx] <= value <= upper[idx]):
-            # Eq. 12 is a hard constraint later, so flag violations now rather than
+            # Eq. 13a is a hard constraint later, so flag violations now rather than
             # letting an out-of-range pose look acceptable in the viewer.
-            print(f"  ! {value:+.3f} is outside joint limits [{lower[idx]:+.3f}, {upper[idx]:+.3f}] (Eq. 12)")
+            print(f"  ! {value:+.3f} is outside joint limits [{lower[idx]:+.3f}, {upper[idx]:+.3f}] (Eq. 13a)")
         q[idx] = value
         vis.display(q)
         print(f"  {name} = {value:+.3f}")

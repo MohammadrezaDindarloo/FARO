@@ -99,6 +99,32 @@ class Scene:
             if iface.patch.name in iface.allowed:
                 raise ValueError(f"interface {iface.name!r} lists its own patch as a contact target")
 
+    def containment_report(self) -> list[str]:
+        """Allowed pairs that Eq. 7b can never satisfy, whatever the robot does.
+
+        Eq. 7b is a CONTAINMENT condition, |p_{x,y}| <= (^b xi_b) - (^b xi_a): the
+        interface's own patch `a` must fit inside its target `b`. If it cannot, every
+        contact using that pair is infeasible for a reason that has nothing to do
+        with the robot -- and inside a tree search it would look like an unlucky
+        branch rather than a scene bug.
+
+        Returns human-readable descriptions; empty means every pair is satisfiable.
+        Not raised from `validate()` because an equal-sized pair is legitimate at the
+        boundary, and because a scene may deliberately include a pair it never uses.
+        """
+        from faro.constraints.contact import patch_containment_is_possible
+
+        problems = []
+        for iface in self.interfaces.values():
+            for target in iface.allowed:
+                a, b = iface.patch, self.patches[target]
+                if not patch_containment_is_possible(a.half_extents, b.half_extents):
+                    problems.append(
+                        f"{iface.name}: patch {a.name} {a.half_extents} does not fit "
+                        f"inside {b.name} {b.half_extents} -- Eq. 7b can never hold"
+                    )
+        return problems
+
     # ------------------------------------------------------------------ queries
     def branching_factor(self) -> int:
         """Size of the discrete action set at one tree-search node (Alg. 1).

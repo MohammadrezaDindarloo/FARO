@@ -44,8 +44,15 @@ Confidence: high, but *inferred*. The evidence chain:
 
 **Use the 29-DoF variant (no articulated hands).** FARO models every end-effector
 as a *rectangular contact patch* (§II-C 1), never as an articulated gripper — the
-"hand" is just a patch frame on the palm/wrist link. The 14 extra finger DoF in the
-`with_hand` variant would add pure NLP cost with zero modelling benefit.
+"hand" is just a patch frame. The 14 extra finger DoF in the `with_hand` variant
+would add pure NLP cost with zero modelling benefit.
+
+Moreover the paper **removes the hand entirely at the wrist** and puts the patch on
+the resulting cut face (visible in Figs. 1, 4, 5 — the arms end in a flat stub). So
+our patch is anchored to `*_wrist_yaw_link` at the hand's own mounting plane
+(x = 0.0415), with its normal pointing **out along the forearm**. The robot presses
+the box's ±y faces between the ends of its two forearms rather than pinching with
+palms. See `ambiguities.md` #7 / #7b.
 
 ---
 

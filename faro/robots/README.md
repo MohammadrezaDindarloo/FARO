@@ -7,8 +7,10 @@ what makes the robot swappable by editing `configs/robots/*.yaml`.
 ## Paper grounding
 
 No single equation. Provides the substrate for:
-- **Eq. 12** joint position/velocity limits (`joint_limits()`)
-- **Eq. 13** torque-speed limits (actuation selection via `n_actuated`)
+- **Eq. 13a/13b** joint position and velocity limits (`joint_limits()`)
+- **Eq. 12** actuated joint torque `τ_j := S(M(q)v̇ + b(q,v) − Σ_e J_e(q)ᵀλ_e)`;
+  the selection matrix `S` corresponds to `n_actuated`
+- **Eq. 13c** torque-speed envelope
 - **Eq. 10** centroidal robot dynamics (Milestone 5, via Pinocchio's CMM)
 - Symbolic kinematics for **Eqs. 14 / 15 / 17** (`casadi_model()`)
 

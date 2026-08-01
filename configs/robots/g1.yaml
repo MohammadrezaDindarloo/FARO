@@ -12,7 +12,16 @@
 name: g1_29dof
 
 # erd:// resolves inside $CONDA_PREFIX/share/example-robot-data/robots/
-urdf: "erd://g1_description/urdf/g1_29dof_rev_1_0.urdf"
+# The hands are CUT OFF AT THE WRIST, as the paper does (docs/ambiguities.md #7b) --
+# our contact patch sits on the wrist cut face, and a 13 cm hand hanging 0.09 m past
+# it would pass straight through whatever the robot touches.
+#
+# This URDF is generated from example-robot-data by
+#     python -m faro.robots.urdf_surgery
+# The hand blocks are COMMENTED OUT in it, not deleted, with a note explaining why.
+# To restore the full hand: uncomment those blocks and move the patch back to the
+# palm in configs/scenes/box_placement.yaml.
+urdf: "assets://robots/g1_description/urdf/g1_29dof_faro.urdf"
 
 # Loaded with a free-flyer root => nq=36, nv=35, 29 actuated joints.
 # The 6 unactuated base DoF are exactly why contact forces are needed at all.
@@ -29,13 +38,19 @@ urdf: "erd://g1_description/urdf/g1_29dof_rev_1_0.urdf"
 # Values in RADIANS.
 # --------------------------------------------------------------------------------
 nominal_configuration:
-  # legs: -0.20 + 0.42 - 0.23 = -0.01 ~= 0  => soles stay flat
+  # Legs: the pitch chain must sum to EXACTLY zero so the soles are exactly parallel
+  # to the floor:  -0.20 + 0.42 - 0.22 = 0.
+  #
+  # This is not cosmetic. q_nominal is both the Eq. 14 regularization target and the
+  # initial guess for every stage, so a residual sole tilt would mean the starting
+  # point violates Eq. 7a from the outset. An earlier version used -0.23, leaving a
+  # 0.01 rad tilt that showed up immediately in the constraint demos.
   left_hip_pitch_joint: -0.20
   left_knee_joint: 0.42
-  left_ankle_pitch_joint: -0.23
+  left_ankle_pitch_joint: -0.22
   right_hip_pitch_joint: -0.20
   right_knee_joint: 0.42
-  right_ankle_pitch_joint: -0.23
+  right_ankle_pitch_joint: -0.22
 
   # arms: brought slightly forward and inward, a plausible pre-grasp posture
   left_shoulder_pitch_joint: 0.25

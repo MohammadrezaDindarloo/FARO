@@ -43,6 +43,9 @@ class SceneVisualizer:
     def __init__(self, scene: Scene, open_browser: bool = False, show_patches: bool = True):
         self.scene = scene
         self.show_patches = show_patches
+        # The pose currently on screen. Robot patches are redrawn against it,
+        # not against q_nominal -- see `_initial_world_placement`.
+        self._last_q = None
 
         self.viz = MeshcatVisualizer(
             scene.robot.model, scene.robot.collision_model, scene.robot.visual_model
@@ -63,7 +66,9 @@ class SceneVisualizer:
 
     def display(self, q: np.ndarray) -> None:
         """Show configuration q and move every q-dependent patch with it."""
-        self.viz.display(np.asarray(q))
+        q = np.asarray(q)
+        self._last_q = q.copy()
+        self.viz.display(q)
         if self.show_patches:
             self._update_robot_patches(q)
 
@@ -141,7 +146,18 @@ class SceneVisualizer:
 
     # ------------------------------------------------------------------ helpers
     def _initial_world_placement(self, patch: ContactPatch) -> pin.SE3:
-        q = self.scene.robot.q_nominal if patch.attachment is Attachment.ROBOT else None
+        """Where a patch goes when the whole set is (re)drawn.
+
+        Robot patches must follow the pose CURRENTLY on screen, not `q_nominal`.
+        `q_nominal` places the pelvis at z = 0, so its feet hang 0.78 m below the
+        floor -- `standing_configuration` is what drops the robot onto the ground.
+        Redrawing against the nominal therefore detached every green robot patch from
+        the robot and left it floating underground until the next `display()`, which
+        is precisely what a viewer sees while the runner waits for a keypress.
+        """
+        if patch.attachment is not Attachment.ROBOT:
+            return self.scene.patch_world_placement(patch, None)
+        q = self._last_q if self._last_q is not None else self.scene.robot.q_nominal
         return self.scene.patch_world_placement(patch, q)
 
     def _set_patch_transform(self, patch: ContactPatch, world: pin.SE3) -> None:
