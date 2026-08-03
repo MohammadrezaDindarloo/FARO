@@ -46,6 +46,11 @@ class SceneVisualizer:
         # The pose currently on screen. Robot patches are redrawn against it,
         # not against q_nominal -- see `_initial_world_placement`.
         self._last_q = None
+        # The scene's own object poses, captured before anything can move them.
+        # `update_object_pose` MUTATES `obj.initial_pose`, so without this copy the
+        # "default" drifts to wherever the last scenario left the object and there is
+        # nothing left to restore to.
+        self._home_poses = {n: o.initial_pose.copy() for n, o in scene.objects.items()}
 
         self.viz = MeshcatVisualizer(
             scene.robot.model, scene.robot.collision_model, scene.robot.visual_model
@@ -103,6 +108,22 @@ class SceneVisualizer:
             # The patch plane is the slab's TOP face, so drop the centre by half.
             slab = patch.placement * pin.SE3(np.eye(3), np.array([0.0, 0.0, -thickness / 2.0]))
             self.viewer[f"environment/{patch.name}"].set_transform(slab.homogeneous)
+
+    def reset_object_poses(self) -> None:
+        """Put every object back where the SCENE says it lives.
+
+        Scenarios that move an object leave it moved, because `update_object_pose`
+        mutates the scene. Most scenarios never mention the box at all, so without
+        this they inherit whatever the previous one left -- and the viewer state
+        depends on the order you happened to run things in.
+
+        The visible symptom: `11-hold` parks the box in mid-air at z = 0.45, so
+        `11-spin`, which runs next and draws its own probe body at z = 0.60,
+        appeared to intersect it. Running `-s 11-spin` alone showed no such overlap,
+        which is exactly the signature of leaked state.
+        """
+        for name, pose in self._home_poses.items():
+            self.update_object_pose(name, pose.copy())
 
     def _draw_objects(self) -> None:
         import meshcat.geometry as g

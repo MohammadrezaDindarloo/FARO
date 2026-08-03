@@ -21,6 +21,7 @@ from faro.constraints.contact import (
     patch_containment_is_possible,
 )
 from faro.constraints.dynamics_object import (
+    external_wrench,
     gravity_wrench,
     object_integration,
     object_newton_euler,
@@ -67,7 +68,7 @@ __all__ = [
     "integrate_configuration", "center_of_mass", "total_mass",
     # Eq. 11
     "object_newton_euler", "object_integration", "spatial_inertia",
-    "gravity_wrench", "transform_wrench_to_body",
+    "external_wrench", "gravity_wrench", "transform_wrench_to_body",
     # Eqs. 12-13
     "actuated_slice", "actuated_torque", "joint_position_limits",
     "joint_velocity_limits", "torque_speed_limits", "default_velocity_limits",

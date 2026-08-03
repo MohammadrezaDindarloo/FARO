@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pinocchio as pin
 import pytest
 
 from faro.scenarios.constraint_demos import ALL_SCENARIOS, run_sweep
@@ -303,6 +304,82 @@ def test_11_spin_actually_tumbles_the_body_at_the_swept_rate(scene):
             f"principal moments {moments} violate the triangle inequality -- no rigid "
             f"body has this inertia"
         )
+
+
+def test_the_spin_probe_does_not_intersect_any_scene_object(scene):
+    """`11-spin` draws its own body, so it must not be drawn inside the scene's.
+
+    Reported from the viewer: the grey slab appeared to pass through the yellow box.
+    It only did so when the scenarios were run in SEQUENCE -- `11-hold` parks the box
+    in mid-air at z = 0.45 and `11-spin` inherited that, because most scenarios never
+    mention the box and `update_object_pose` mutates the scene. Running `-s 11-spin`
+    alone looked fine, which is the signature of leaked state rather than bad geometry.
+
+    Checked against EVERY pose any scenario puts the box in, not just its home pose.
+    Clearing only the home pose would have passed even at the original z = 0.60, since
+    the collision was with the box where `11-hold` leaves it -- so that weaker check
+    would have gone green on the exact bug it was written for.
+    """
+    from faro.scenarios.constraint_demos import (
+        _SPIN_POSE, _SPIN_SIZE, resolve_predictions,
+    )
+
+    resolve_predictions(scene)      # several sweeps have no `values` until this runs
+    box = scene.objects["box"]
+    poses = [np.asarray(box.initial_pose.translation, float)]
+    for scenario in ALL_SCENARIOS:
+        for step in run_sweep(scenario, scene).steps:
+            if "box_pose" in step.state:
+                poses.append(np.asarray(step.state["box_pose"].translation, float))
+
+    probe_c, probe_h = np.asarray(_SPIN_POSE, float), np.asarray(_SPIN_SIZE, float) / 2.0
+    half = np.asarray(box.size, float) / 2.0
+    for centre in poses:
+        overlap = np.minimum(centre + half, probe_c + probe_h) - np.maximum(centre - half, probe_c - probe_h)
+        assert not np.all(overlap > 0), (
+            f"the 11-spin probe intersects the box at {np.round(centre, 3)}; "
+            f"raise _SPIN_POSE clear of every pose a scenario uses"
+        )
+
+
+def test_object_poses_do_not_leak_between_scenarios(scene):
+    """A scenario's picture must not depend on which scenario ran before it.
+
+    `update_object_pose` mutates `scene.objects[...].initial_pose`, and 18 of the
+    scenarios never declare a `box_pose` at all -- so before the fix the box simply
+    stayed wherever the last one left it. `reset_object_poses` restores the scene's
+    own poses, and `ConstraintOverlay.clear()` calls it after every sweep.
+    """
+    from faro.viz.meshcat_viz import SceneVisualizer
+
+    vis = SceneVisualizer.__new__(SceneVisualizer)   # no meshcat server needed
+    vis.scene = scene
+    vis._home_poses = {n: o.initial_pose.copy() for n, o in scene.objects.items()}
+    moved = []
+    vis.update_object_pose = lambda name, pose: (
+        moved.append(name), setattr(scene.objects[name], "initial_pose", pose))[0]
+
+    home = scene.objects["box"].initial_pose.copy()
+    scene.objects["box"].initial_pose = pin.SE3(np.eye(3), np.array([9.0, 9.0, 9.0]))
+
+    # `clear()` is what runs between scenarios, so it -- not just `reset_object_poses`
+    # -- has to do the restoring. Driving the reset directly would pass even with the
+    # call missing from `clear()`, which is exactly how a first version of this test
+    # went green on the bug it was written for.
+    from faro.viz.constraint_viz import ConstraintOverlay
+
+    overlay = ConstraintOverlay.__new__(ConstraintOverlay)
+    overlay.vis = vis
+    overlay._active = set()
+    vis._draw_patches = lambda: None
+    vis._draw_objects = lambda: None
+    overlay.clear()
+
+    assert moved == ["box"], "clear() must restore every object it knows about"
+    np.testing.assert_allclose(
+        scene.objects["box"].initial_pose.homogeneous, home.homogeneous, atol=1e-12,
+        err_msg="the box was not returned to its scene pose",
+    )
 
 
 @pytest.mark.parametrize("key", [s.key for s in ALL_SCENARIOS], ids=lambda k: k)

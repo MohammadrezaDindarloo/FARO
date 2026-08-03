@@ -72,11 +72,11 @@ def centroidal_consistency(cmodel, cdata, q, v, h, *, name: str = "centroidal") 
     momentum variables would be free to take any value and the model would permit
     motions the actual robot cannot produce.
     """
-    cpin.computeCentroidalMap(cmodel, cdata, q)
+    cpin.computeCentroidalMap(cmodel, cdata, as_sx(q))
     A = cdata.Ag
     return ConstraintBlock(
         name=name,
-        eq=h - A @ v,
+        eq=as_sx(h) - A @ as_sx(v),
         eq_labels=[f"10b:h-Av[{i}]" for i in range(6)],
     )
 
@@ -144,5 +144,5 @@ def total_mass(model) -> float:
 
 def center_of_mass(cmodel, cdata, q):
     """Symbolic centre of mass c(q), for the moment arms in Eq. 10b."""
-    cpin.centerOfMass(cmodel, cdata, q)
+    cpin.centerOfMass(cmodel, cdata, as_sx(q))
     return cdata.com[0]

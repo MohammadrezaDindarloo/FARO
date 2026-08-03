@@ -13,6 +13,11 @@
 
     W^o_ext := W^o_env + W^o_grav + sum_{a in I} W^o_a
 
+Eq. 11a splits across two functions because its two lines live in different spaces:
+`object_pose_residual` for the SE(3) line (needs the exponential map) and
+`object_integration` for the twist line (a plain vector-space defect).
+`full_object_integration` returns both.
+
 Eq. 11b is the Newton-Euler equation in body coordinates. It is why objects need
 their own state (Eq. 5b) rather than being welded into the robot model: a carried
 box has its own momentum and its own contact wrenches.
@@ -85,17 +90,80 @@ def object_newton_euler(V, Vdot, W_ext, G, *, name: str = "object_ne") -> Constr
     )
 
 
+def object_pose_residual(M_i, V_next, M_next, dt_scaled, *, name: str = "object_pose"):
+    """Eq. 11a, FIRST line: q^o_{i+1} = q^o_i (+) V^o_{i+1} (T_bar dt), on SE(3).
+
+    Parameters
+    ----------
+    M_i, M_next : object poses at steps i and i+1, as `pinocchio.SE3` (numeric) or
+        `pinocchio.casadi.SE3` (symbolic).
+    V_next : the object BODY twist at i+1, ANGULAR-FIRST like everything else here.
+
+    Returns 6 equalities, the pose defect expressed in the tangent space at `M_next`.
+
+    THREE things here are easy to get wrong, and all three are silent:
+
+    1. `(+)` is the SE(3) exponential, not addition. A pose is not a vector; adding
+       `V dt` to a rotation matrix leaves SO(3) immediately.
+
+    2. V is a BODY twist, so it composes on the RIGHT: `M_i * exp6(V dt)`. Writing
+       `exp6(V dt) * M_i` treats it as a spatial twist and rotates the object about
+       the world origin instead of its own centre -- the two agree only when the
+       object sits at the origin with identity orientation, which is exactly the
+       configuration a first test tends to use.
+
+    3. `pinocchio`'s `exp6`/`log6` are LINEAR-FIRST, while Eq. 11b and this whole
+       module are ANGULAR-FIRST (Lynch & Park). This is the one place in the codebase
+       where a twist genuinely crosses that boundary, so it goes through
+       `swap_spatial_ordering` rather than relying on the blocks happening to line up.
+
+    The residual is `log6(predicted^-1 * M_next)`, a difference taken ON the manifold
+    for the same reason `robot_dynamics` uses `cpin.difference` rather than `q_next -
+    q_pred`: subtracting two poses entrywise is meaningless.
+    """
+    import pinocchio.casadi as cpin
+
+    from faro.constraints.frames import swap_spatial_ordering
+
+    # angular-first (ours) -> linear-first (pinocchio's exp6)
+    twist = swap_spatial_ordering(ca.SX(V_next)) * dt_scaled
+    predicted = M_i * cpin.exp6(twist)
+    residual = cpin.log6(predicted.actInv(M_next)).vector
+
+    return ConstraintBlock(
+        name=name,
+        eq=residual,
+        eq_labels=[f"11a:q[{i}]" for i in range(6)],
+    )
+
+
 def object_integration(q_i, V_i, q_next, V_next, Vdot_next, dt_scaled, *, name: str = "object_int"):
-    """Eq. 11a: backward-Euler integration of object pose and twist.
+    """Eq. 11a, SECOND line: V^o_{i+1} = V^o_i + Vdot^o_{i+1} (T_bar dt).
 
-    The pose residual is left to the caller's SE(3) parameterisation via
-    `pose_residual`, because objects are stored as SE(3) rather than as a Pinocchio
-    model. Only the twist defect is universal, so that is what this returns.
+    The twist lives in a vector space, so this one really is plain addition. The POSE
+    line is `object_pose_residual`, which needs the SE(3) exponential and is kept
+    separate because it needs the poses as SE3 objects rather than as coordinates.
 
-    Note `V_next` and `Vdot_next` on the right-hand sides -- backward Euler again.
+    Note `Vdot_next` on the right-hand side -- backward Euler, as the paper writes it.
+
+    `q_i` and `q_next` are accepted only so the signature mirrors the paper's line;
+    they are not used here. An earlier version took them and quietly returned a
+    six-row block that ignored them entirely, so a caller could hand it two wildly
+    inconsistent poses and get a zero residual back. Pass them to
+    `object_pose_residual` -- `full_object_integration` does both.
     """
     eq = V_next - (V_i + Vdot_next * dt_scaled)
     return ConstraintBlock(name=name, eq=eq, eq_labels=[f"11a:V[{i}]" for i in range(6)])
+
+
+def full_object_integration(M_i, V_i, M_next, V_next, Vdot_next, dt_scaled,
+                            *, name: str = "object_11a") -> ConstraintBlock:
+    """Both lines of Eq. 11a: 12 equalities, pose defect then twist defect."""
+    from faro.constraints.block import merge
+
+    pose = object_pose_residual(M_i, V_next, M_next, dt_scaled, name="pose")
+    twist = object_integration(None, V_i, None, V_next, Vdot_next, dt_scaled, name="twist")
+    return merge(name, [pose, twist])
 
 
 def gravity_wrench(mass: float, R_world_body, gravity: float = 9.81):
@@ -109,6 +177,41 @@ def gravity_wrench(mass: float, R_world_body, gravity: float = 9.81):
     f_world = ca.vertcat(0.0, 0.0, -float(mass) * gravity)
     f_body = R_world_body.T @ f_world
     return ca.vertcat(ca.SX.zeros(3), f_body)
+
+
+def external_wrench(mass: float, R_world_body, *, contacts=(), W_env=None,
+                    gravity: float = 9.81):
+    """The paper's definition line: W^o_ext := W^o_env + W^o_grav + sum_{a in I} W^o_a.
+
+    Everything returned is in the object BODY frame, angular-first, ready for
+    `object_newton_euler`. Until this existed the definition had no home in the code:
+    `object_newton_euler` took `W_ext` as a parameter and the sum was assembled inline,
+    by hand, in one scenario. `transform_wrench_to_body` -- the ingredient every
+    `W^o_a` needs -- was called by no production code at all, only by a test.
+
+    Parameters
+    ----------
+    contacts : iterable of `(force_world, moment_world, application_point_body)`, one
+        per contact interface `a` acting on the object. The application point is in
+        BODY coordinates, and it is the whole reason this cannot be a plain sum.
+    W_env : any other environment wrench (drag, a spring, a conveyor), body frame,
+        angular-first. The paper lists it separately and never says what is in it, so
+        it defaults to nothing rather than being silently assumed zero forever.
+
+    WHY THE MOMENT ARM IS THE POINT. A hand pressing a box FACE acts well away from
+    the box's centre of mass, so its wrench contributes `p x f` to the moment even
+    when the hand applies no torque of its own. Summing the raw force vectors instead
+    -- the obvious-looking implementation -- gives an object that translates correctly
+    and NEVER ROTATES when pushed off-centre. Nothing in Eq. 11b would flag that; the
+    residual balances perfectly for the wrong physics.
+    """
+    total = gravity_wrench(mass, R_world_body, gravity)
+    if W_env is not None:
+        total = total + W_env
+    for force_world, moment_world, point_body in contacts:
+        total = total + transform_wrench_to_body(
+            R_world_body, point_body, force_world, moment_world)
+    return total
 
 
 def transform_wrench_to_body(R_world_body, application_point_body, force_world, moment_world):

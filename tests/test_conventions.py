@@ -31,7 +31,7 @@ from faro.constraints.dynamics_object import (
     transform_wrench_to_body,
 )
 from faro.constraints.dynamics_robot import centroidal_momentum_rate
-from faro.constraints.limits import actuated_torque
+from faro.constraints.limits import actuated_torque, joint_position_limits
 from faro.constraints.frames import (
     RX_PI,
     log3,
@@ -187,6 +187,61 @@ def test_spatial_inertia_is_angular_first_not_pinocchio_s_ordering():
     np.testing.assert_allclose(np.diag(G), [1.0, 2.0, 4.0, 3.0, 3.0, 3.0])
 
 
+def test_external_wrench_assembles_the_papers_definition_line():
+    """W_ext := W_env + W_grav + sum_a W_a -- which had no home in the code at all.
+
+    `object_newton_euler` took W_ext as a parameter, the sum was assembled by hand in
+    one scenario, `W_env` appeared nowhere outside a printed string, and
+    `transform_wrench_to_body` was called by no production code -- only by a test.
+    """
+    from faro.constraints.dynamics_object import external_wrench
+
+    mass, g = 2.0, 9.81
+    # Gravity alone, body frame aligned with the world: pure downward force, no moment.
+    only_gravity = _evalf(external_wrench(mass, ca.DM.eye(3), gravity=g))
+    np.testing.assert_allclose(only_gravity, [0, 0, 0, 0, 0, -mass * g], atol=1e-12)
+
+    # A support at the centre of mass exactly cancels it.
+    balanced = _evalf(external_wrench(
+        mass, ca.DM.eye(3), gravity=g,
+        contacts=[(ca.DM([0.0, 0.0, mass * g]), ca.DM.zeros(3), ca.DM.zeros(3))]))
+    np.testing.assert_allclose(balanced, 0.0, atol=1e-12)
+
+    # W_env is carried through rather than silently assumed zero.
+    with_env = _evalf(external_wrench(
+        mass, ca.DM.eye(3), gravity=g, W_env=ca.DM([0.0, 0.0, 0.7, 1.5, 0.0, 0.0])))
+    np.testing.assert_allclose(with_env - only_gravity, [0, 0, 0.7, 1.5, 0, 0], atol=1e-12)
+
+
+def test_external_wrench_transports_off_centre_contacts_into_a_moment():
+    """The reason this cannot be a plain sum of force vectors.
+
+    A hand pressing a box FACE acts well away from the centre of mass, so its wrench
+    contributes `p x f` to the moment even with no applied torque. Summing raw forces
+    gives an object that translates correctly and NEVER ROTATES when pushed off-centre
+    -- and Eq. 11b's residual balances perfectly for that wrong physics, so nothing
+    downstream would catch it.
+    """
+    from faro.constraints.dynamics_object import external_wrench
+
+    push = ca.DM([0.0, 0.0, 10.0])
+    point = np.array([0.15, 0.0, 0.0])       # 15 cm off-axis: a box face, not the centre
+
+    centred = _evalf(external_wrench(
+        0.0, ca.DM.eye(3), gravity=0.0,
+        contacts=[(push, ca.DM.zeros(3), ca.DM.zeros(3))]))
+    offset = _evalf(external_wrench(
+        0.0, ca.DM.eye(3), gravity=0.0,
+        contacts=[(push, ca.DM.zeros(3), ca.DM(point.reshape(3, 1)))]))
+
+    # Same force either way...
+    np.testing.assert_allclose(centred[3:], offset[3:], atol=1e-12)
+    # ...but only the off-centre one produces a moment, and it is exactly p x f.
+    np.testing.assert_allclose(centred[:3], 0.0, atol=1e-12)
+    np.testing.assert_allclose(offset[:3], np.cross(point, np.array([0.0, 0.0, 10.0])), atol=1e-12)
+    assert np.abs(offset[:3]).max() > 1.0, "an off-centre push must generate a real moment"
+
+
 def test_transform_wrench_to_body_transports_the_moment_arm():
     R = pin.utils.rpyToMatrix(0.2, 0.3, -0.4)
     point = np.array([0.1, -0.2, 0.05])
@@ -197,6 +252,99 @@ def test_transform_wrench_to_body_transports_the_moment_arm():
     force_b = R.T @ force_w
     np.testing.assert_allclose(got[3:], force_b, atol=1e-12)
     np.testing.assert_allclose(got[:3], np.cross(point, force_b), atol=1e-12)
+
+
+# =============================================================================
+# Eq. 11a -- object pose integration on SE(3)
+# =============================================================================
+def _se3_sx(M: pin.SE3):
+    import pinocchio.casadi as cpin
+
+    return cpin.SE3(ca.SX(ca.DM(M.rotation)), ca.SX(ca.DM(M.translation.reshape(3, 1))))
+
+
+_M_I = pin.SE3(pin.utils.rpyToMatrix(0.3, -0.2, 0.7), np.array([0.4, -0.1, 0.6]))
+_OMEGA = np.array([0.9, -1.4, 2.1])
+_LINVEL = np.array([0.5, 0.2, -0.3])
+_V = np.concatenate([_OMEGA, _LINVEL])       # ANGULAR-FIRST, body twist
+_DT = 0.05
+
+
+def _pose_residual(M_next: pin.SE3) -> np.ndarray:
+    from faro.constraints.dynamics_object import object_pose_residual
+
+    return _evalf(object_pose_residual(
+        _se3_sx(_M_I), ca.DM(_V.reshape(6, 1)), _se3_sx(M_next), _DT).eq)
+
+
+def test_eq_11a_pose_line_is_satisfied_by_a_consistent_pose_pair():
+    """The first line of Eq. 11a existed only as a comment; `q_i`/`q_next` were ignored.
+
+    `object_integration` accepted both poses and returned a six-row block that used
+    neither, so a caller could hand it two wildly inconsistent poses and get a zero
+    residual. Its docstring pointed at a `pose_residual` function that was never
+    written. Ground truth here is built with NUMERIC pinocchio, independently of the
+    CasADi path under test.
+    """
+    truth = _M_I * pin.exp6(np.concatenate([_LINVEL, _OMEGA]) * _DT)
+    np.testing.assert_allclose(_pose_residual(truth), 0.0, atol=1e-12)
+
+
+def test_eq_11a_pose_line_rejects_an_inconsistent_pose_pair():
+    """The check the old code could not make: a wrong next pose must show up."""
+    truth = _M_I * pin.exp6(np.concatenate([_LINVEL, _OMEGA]) * _DT)
+    drifted = pin.SE3(truth.rotation, truth.translation + np.array([0.05, 0.0, 0.0]))
+    assert np.abs(_pose_residual(drifted)).max() > 1e-3
+
+
+def test_eq_11a_uses_a_body_twist_not_a_spatial_one():
+    """V is a BODY twist, so it composes on the RIGHT: M_i * exp6(V dt).
+
+    Left-multiplying rotates the object about the WORLD origin instead of its own
+    centre. The two agree only when the object sits at the origin with identity
+    orientation -- exactly the pose a first test reaches for, which is why this one
+    deliberately uses a rotated, translated body.
+    """
+    spatial = pin.exp6(np.concatenate([_LINVEL, _OMEGA]) * _DT) * _M_I
+    assert np.abs(_pose_residual(spatial)).max() > 1e-3
+
+
+def test_eq_11a_pose_line_respects_the_angular_first_convention():
+    """pinocchio's exp6 is LINEAR-first; Eq. 11b and this module are ANGULAR-first.
+
+    This is the one place a twist genuinely crosses that boundary. Forgetting the swap
+    integrates the angular rate as a translation and vice versa -- it still runs, and
+    the answer is silently wrong.
+    """
+    swapped = _M_I * pin.exp6(np.concatenate([_OMEGA, _LINVEL]) * _DT)
+    assert np.abs(_pose_residual(swapped)).max() > 1e-3
+
+
+def test_full_object_integration_returns_both_lines_of_eq_11a():
+    from faro.constraints.dynamics_object import full_object_integration
+
+    truth = _M_I * pin.exp6(np.concatenate([_LINVEL, _OMEGA]) * _DT)
+    V_i = np.array([0.4, -0.6, 1.0, 0.2, 0.1, -0.1])
+    Vdot = (_V - V_i) / _DT
+
+    block = full_object_integration(
+        _se3_sx(_M_I), ca.DM(V_i.reshape(6, 1)), _se3_sx(truth),
+        ca.DM(_V.reshape(6, 1)), ca.DM(Vdot.reshape(6, 1)), _DT)
+
+    assert block.n_eq == 12, "6 pose rows + 6 twist rows"
+    np.testing.assert_allclose(_evalf(block.eq), 0.0, atol=1e-12)
+
+
+def test_eq_11a_pose_line_is_differentiable():
+    """It has to survive being handed to Ipopt, not just evaluated."""
+    from faro.constraints.dynamics_object import object_pose_residual
+
+    truth = _M_I * pin.exp6(np.concatenate([_LINVEL, _OMEGA]) * _DT)
+    V = ca.SX.sym("V", 6)
+    block = object_pose_residual(_se3_sx(_M_I), V, _se3_sx(truth), _DT)
+    jac = ca.Function("J", [V], [ca.jacobian(block.eq, V)])(_V)
+    assert np.all(np.isfinite(np.array(jac)))
+    assert np.abs(np.array(jac)).max() > 1e-6, "the residual must actually depend on V"
 
 
 # =============================================================================
@@ -220,6 +368,52 @@ def test_eq_10b_is_linear_first_and_matches_pinocchios_centroidal_map(scene):
     # And `centroidal_momentum_rate` puts gravity in those same rows.
     hdot = _evalf(centroidal_momentum_rate([], [], [], ca.DM.zeros(3), mass=10.0))
     np.testing.assert_allclose(hdot, [0.0, 0.0, -98.1, 0.0, 0.0, 0.0], atol=1e-9)
+
+
+def test_static_scenarios_cannot_test_the_centroidal_map_at_all(scene):
+    """Why `10-swing` had to exist: at v = 0, `h - A(q)v` vanishes for ANY matrix A.
+
+    `10-weight` and `10-moment` both pin the robot in static equilibrium, so they
+    exercise only the FIRST line of Eq. 10b. The second line, h = A(q)v, is identically
+    satisfied at zero velocity no matter what A contains -- a centroidal map filled
+    with garbage would pass both of them. This makes that concrete rather than
+    asserting it, by feeding a deliberately wrong A and showing the residual is
+    unchanged at v = 0 and different the moment the robot moves.
+    """
+    model = scene.robot.model
+    q = scene.robot.q_nominal
+    A = pin.computeCentroidalMap(model, model.createData(), q)
+    nonsense = np.zeros_like(A)          # as wrong as a centroidal map can be
+
+    at_rest = np.zeros(model.nv)
+    np.testing.assert_allclose(A @ at_rest, nonsense @ at_rest, atol=1e-12)
+
+    moving = np.zeros(model.nv)
+    moving[model.joints[model.getJointId("left_shoulder_pitch_joint")].idx_v] = 1.0
+    assert np.abs(A @ moving - nonsense @ moving).max() > 1e-3, (
+        "a moving robot must distinguish the real centroidal map from a wrong one"
+    )
+
+
+def test_10_swing_generates_angular_momentum_from_joint_motion_alone(scene):
+    """The physical claim `10-swing` is built on, checked against Pinocchio directly.
+
+    Swinging the arms produces centroidal ANGULAR momentum with the base perfectly
+    still and nothing in contact -- the falling-cat effect. If this were zero the
+    scenario would be demonstrating nothing, and `h = A(q)v` could be dropped from
+    Eq. 10b without consequence.
+    """
+    from faro.scenarios.constraint_demos import _SWING_JOINTS, _SWING_RATE_MAX
+
+    model = scene.robot.model
+    v = np.zeros(model.nv)
+    for joint in _SWING_JOINTS:
+        v[model.joints[model.getJointId(joint)].idx_v] = -_SWING_RATE_MAX
+
+    h = pin.computeCentroidalMap(model, model.createData(), scene.robot.q_nominal) @ v
+    assert np.abs(h[3:]).max() > 1e-2, (
+        f"arm swing must generate angular momentum; got {h[3:]}"
+    )
 
 
 def test_eq_10b_moment_arm_is_measured_from_the_com_not_the_origin():
@@ -257,6 +451,82 @@ def test_dynamics_terms_build_on_both_sx_and_mx_graphs(sym):
     x = sym("x", 6)
     adjoint_transpose_term(x, spatial_inertia(2.0, np.eye(3)))
     centroidal_momentum_rate([x[:3]], [x[3:6]], [x[:3]], x[:3], mass=1.0)
+
+
+# =============================================================================
+# Eq. 13 -- limits are PER JOINT, from each joint's own URDF specification
+# =============================================================================
+def test_eq_13_limits_are_per_joint_and_genuinely_heterogeneous(scene):
+    """Eq. 13 is componentwise, so each joint must carry its OWN bound.
+
+    Worth pinning because a single shared scalar would look right on any scenario that
+    only ever drives one joint. The G1's 29 actuated joints have 13 distinct position
+    limits, 5 distinct velocity limits and 5 distinct effort limits -- a knee is rated
+    at 139 N.m and 20 rad/s while a wrist is 25 N.m and 37 rad/s.
+    """
+    from faro.constraints.limits import actuated_slice, default_velocity_limits
+
+    model = scene.robot.model
+    q_slice, v_slice = actuated_slice(model), actuated_slice(model, velocity=True)
+    upper = scene.robot.joint_limits()[1][q_slice]
+
+    assert len(set(np.round(upper, 6))) > 1, "position limits must differ between joints"
+    assert len(set(np.round(default_velocity_limits(model)[v_slice], 6))) > 1
+    assert len(set(np.round(np.asarray(model.effortLimit)[v_slice], 6))) > 1
+
+    # And the block really is two rows per joint, not one shared pair.
+    block = joint_position_limits(
+        ca.DM(scene.robot.q_nominal[q_slice].reshape(-1, 1)),
+        scene.robot.joint_limits()[0][q_slice], upper)
+    assert block.ineq.shape[0] == 2 * (model.nv - 6)
+
+
+def test_eq_13c_is_correct_for_more_than_one_joint(scene):
+    """13c has only ever been CALLED with a single joint -- the knee.
+
+    So the vectorised path was unexercised: the elementwise `slope * v`, the per-joint
+    `tau_max` subtraction, and the label-to-row alignment across four sign blocks. A
+    scalar-broadcast bug there would be invisible to every scenario.
+    """
+    from faro.constraints.limits import torque_speed_limits
+
+    tau_max = np.array([139.0, 25.0, 5.0])       # knee, wrist, and a weak joint
+    v_tau_max = np.array([20.0, 37.0, 22.0])
+    tau = np.array([70.0, 24.0, 0.5])
+    v = np.array([1.0, 1.0, 1.0])
+
+    block = torque_speed_limits(ca.DM(tau.reshape(3, 1)), ca.DM(v.reshape(3, 1)),
+                                tau_max=tau_max, v_tau_max=v_tau_max)
+    assert block.ineq.shape[0] == 4 * 3 == len(block.ineq_labels)
+
+    values = _evalf(block.ineq)
+    for i in range(3):
+        by_hand = abs(tau[i]) + (tau_max[i] / v_tau_max[i]) * abs(v[i]) - tau_max[i]
+        from_code = max(v_ for lab, v_ in zip(block.ineq_labels, values) if lab.endswith(f"[{i}]"))
+        assert from_code == pytest.approx(by_hand, abs=1e-12), (
+            f"joint {i} used the wrong tau_max/v_tau_max pair"
+        )
+
+
+def test_missing_velocity_limits_are_sanitised_not_taken_as_zero(scene):
+    """Pinocchio reports 0 for a URDF that omits a joint's velocity limit.
+
+    Zero as a BOUND freezes the joint and makes Eq. 13b violated at any non-zero rate --
+    which reads as a solver bug, not a model gap. The G1 specifies all 29, so the raw
+    array happens to work; the robot is meant to be swappable, so the scenarios go
+    through `default_velocity_limits` instead.
+    """
+    from faro.constraints.limits import default_velocity_limits
+
+    model = scene.robot.model
+    assert np.all(default_velocity_limits(model) > 0)
+
+    # Simulate a URDF that forgot one.
+    patched = model.copy()
+    patched.velocityLimit[10] = 0.0
+    sanitised = default_velocity_limits(patched)
+    assert sanitised[10] > 1.0, "a missing limit must not become a zero bound"
+    assert np.all(sanitised[:10] == default_velocity_limits(model)[:10]), "others untouched"
 
 
 # =============================================================================

@@ -352,8 +352,17 @@ def test_nominal_pose_satisfies_the_contact_constraints_exactly(scene):
     assert abs(tilt.rows["7a:log3(R)_y"]) < 1e-9
 
 
-def test_every_scenario_has_a_derivation_note():
-    """A prediction without a stated derivation is just another implementation."""
+def test_every_scenario_has_a_derivation_note(scene):
+    """A prediction without a stated derivation is just another implementation.
+
+    Takes `scene` and resolves first: several notes quote numbers that only exist once
+    the robot is loaded (a URDF limit, the robot's mass, where the geometry actually
+    collides), so they are filled in by `resolve_predictions`. Without that this test
+    passed only when some earlier test happened to have resolved them already -- which
+    made it order-dependent, and it duly broke the moment a new test file shifted the
+    ordering.
+    """
+    resolve_predictions(scene)
     for scenario in ALL_SCENARIOS:
         assert scenario.prediction_note.strip()
         assert scenario.equation in scenario.prediction_note or "Eq." in scenario.prediction_note
@@ -363,6 +372,44 @@ def test_every_scenario_has_a_derivation_note():
 def test_scenario_keys_are_unique():
     keys = [s.key for s in ALL_SCENARIOS]
     assert len(keys) == len(set(keys))
+
+
+@pytest.mark.parametrize("scenario", ALL_SCENARIOS, ids=lambda s: s.key)
+def test_no_scenario_produces_a_non_finite_row(scenario, scene):
+    """EVERY row of the block must be finite -- not just the ones the sweep plots.
+
+    `run_sweep` reduces each block to a margin over a HANDFUL of named rows, so a NaN
+    anywhere else is invisible: the plot stays smooth, the crossing lands where it was
+    predicted, and every other test passes. That is exactly what happened. `10a-forward`
+    sweeps dt from 0, `robot_rollout` formed `vdot = (v_{i+1} - v_i)/dt`, and at dt = 0
+    that 0/0 put NaN into 35 of Eq. 10a's 76 rows while the six base-pose rows the
+    scenario watches stayed clean.
+
+    It matters beyond tidiness: a NaN row reaching Ipopt is not a bad number, it is an
+    immediate `Invalid_Number_Detected` with no indication of which constraint produced
+    it. Better to catch it here, where the scenario name says where to look.
+    """
+    import casadi as ca
+
+    # `ScenarioStep` keeps only the watched rows, so the block has to be rebuilt to see
+    # all of them. Every 10th point plus BOTH ENDPOINTS -- the endpoints are where the
+    # degenerate parameter values live (dt = 0, zero separation, zero load), and they are
+    # where this test earns its keep.
+    values = list(scenario.values)
+    probe = sorted({0, len(values) - 1, *range(0, len(values), 10)})
+
+    for index in probe:
+        value = float(values[index])
+        block, _watched, _state = scenario.build(scene, value)
+        for rows, labels in ((block.eq, block.eq_labels), (block.ineq, block.ineq_labels)):
+            if rows is None or rows.numel() == 0:
+                continue
+            numbers = np.asarray(ca.DM(rows)).ravel()
+            bad = np.where(~np.isfinite(numbers))[0]
+            assert bad.size == 0, (
+                f"{scenario.key} at {scenario.param_label} = {value}: non-finite rows "
+                f"{[labels[i] for i in bad[:5]]} (of {bad.size})"
+            )
 
 
 # =============================================================================

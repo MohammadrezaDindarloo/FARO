@@ -26,12 +26,22 @@ from faro.constraints.collision import WitnessData, collision_avoidance, query_w
 from faro.constraints.contact import contact_kinematic, contact_wrench
 from faro.constraints.limits import actuated_slice, joint_position_limits
 from faro.constraints.dynamics_object import (
+    external_wrench,
     gravity_wrench,
     object_newton_euler,
     spatial_inertia,
 )
-from faro.constraints.dynamics_robot import centroidal_momentum_rate, total_mass
-from faro.constraints.limits import joint_velocity_limits, torque_speed_limits
+from faro.constraints.dynamics_robot import (
+    centroidal_consistency,
+    robot_dynamics,
+    centroidal_momentum_rate,
+    total_mass,
+)
+from faro.constraints.limits import (
+    default_velocity_limits,
+    joint_velocity_limits,
+    torque_speed_limits,
+)
 from faro.constraints.no_slip import no_slip
 from faro.core.patches import Attachment
 from faro.scene.scene import Scene
@@ -45,6 +55,19 @@ EQ_TOL = 1e-9
 # --fps. Scenarios that sweep a RATE integrate against it so the motion on screen is
 # the velocity under test, rather than a static pose with a caption.
 _FRAME_DT = 1.0 / 25.0
+
+# SLOW MOTION. The G1's knee is rated at 20 rad/s and its range is only 2.97 rad, so
+# at full speed it crosses the whole range in four frames -- on screen that is not
+# "fast", it is a flicker with no readable direction. Playing the motion at 1/6 speed
+# keeps roughly twenty frames per traverse, which reads as a fast swing.
+#
+# This changes the PLAYBACK RATE, never the physics: the constraint is still evaluated
+# at the true swept velocity, and the crossing still lands on the URDF's v_max. The
+# frame-to-frame angle is `v * dt / _SLOWDOWN`, so it stays exactly proportional to
+# the rate under test -- which is what `test_velocity_scenarios_actually_move_the_joint`
+# checks. The banner in `expect` tells the viewer it is slowed, so the speed on screen
+# is never mistaken for the number in the terminal.
+_SLOWDOWN = 6.0
 
 
 # =============================================================================
@@ -835,6 +858,68 @@ def _build_10_weight(scene: Scene, f_z: float):
     }
 
 
+# Eq. 10b's SECOND line, h = A(q) v, needs a moving robot -- the static scenarios pin
+# v = 0, where `A(q) v` is identically zero for every A and the row proves nothing.
+_SWING_JOINTS = ("left_shoulder_pitch_joint", "right_shoulder_pitch_joint")
+_SWING_RATE_MAX = 2.0       # rad/s at the end of the sweep
+_SWING_STEPS = 81
+_SWING_DURATION = (_SWING_STEPS - 1) * _FRAME_DT / _SLOWDOWN
+
+
+def _build_10_swing(scene: Scene, rate: float):
+    """Swing both arms and claim the robot still has zero centroidal momentum.
+
+    This is the row the static scenarios cannot reach. `10-weight` and `10-moment`
+    both pin v = 0, and at v = 0 the residual `h - A(q) v` is zero for ANY matrix A --
+    a completely wrong centroidal map would pass both of them. Only motion tests it.
+
+    The physical content is the striking part, and it is visible in the viewer: the
+    feet never move and nothing pushes the robot, yet swinging the arms produces real
+    centroidal angular momentum. That is how a cat rights itself in mid-air, and how a
+    humanoid steers its yaw in flight. It is also why Eq. 10b carries `h = A(q) v` as
+    a SEPARATE constraint: the momentum variables are not free, they are whatever the
+    joint motion makes them.
+
+    So the sweep claims h = 0 while the arms speed up, and the residual is exactly the
+    momentum the swing generates. It crosses at rate = 0 -- any motion at all makes the
+    claim false. That crossing pins the SIGN and the STRUCTURE of A; its VALUE is
+    pinned separately against Pinocchio's own `ccrba` in test_milestone2_symbolic.py.
+    """
+    model = scene.robot.model
+    q = standing_configuration(scene)
+
+    # Integrate the rate ramp so the arms genuinely swing at the rate under test,
+    # the same construction the knee uses in 13b-speed.
+    angle = 0.5 * rate ** 2 * _SWING_DURATION / _SWING_RATE_MAX
+    v = np.zeros(model.nv)
+    for joint in _SWING_JOINTS:
+        joint_id = model.getJointId(joint)
+        q[model.joints[joint_id].idx_q] -= angle
+        v[model.joints[joint_id].idx_v] = -rate
+
+    cmodel = scene.robot.casadi_model()
+    block = centroidal_consistency(
+        cmodel, cmodel.createData(), ca.DM(q.reshape(-1, 1)),
+        ca.DM(v.reshape(-1, 1)), ca.DM.zeros(6),
+    )
+
+    # Row 4 is angular-y in Eq. 10b's [linear; angular] ordering -- the pitch axis the
+    # shoulders swing about, and the component the swing actually loads.
+    true_h = np.asarray(
+        pin.computeCentroidalMap(model, model.createData(), q) @ v, dtype=float
+    ).ravel()
+    com = np.asarray(pin.centerOfMass(model, scene.robot.data, q)).ravel()
+    return block, ["10b:h-Av[4]"], {
+        "q": q, "patches": (), "com": com, "status_at": com,
+        "vectors": [
+            {"origin": com, "vector": true_h[3:], "color": "moment", "scale": 0.9,
+             "path": "overlay/h_angular"},
+            {"origin": com, "vector": true_h[:3], "scale": 0.05,
+             "path": "overlay/h_linear"},
+        ],
+    }
+
+
 def _build_10_moment(scene: Scene, offset: float):
     """Slide the support sideways under a robot that is already carrying its weight.
 
@@ -884,16 +969,25 @@ _W_MOMENT_X = 0
 def _build_11_hold(scene: Scene, f_z: float):
     """Hold the box against gravity. At rest Eq. 11b reduces to W_ext = 0.
 
-    The weight comes from `gravity_wrench` rather than being written by hand, so the
-    scenario exercises that function AND the angular-first ordering: put the support
+    W_ext is assembled by `external_wrench` -- the paper's own definition line,
+    W_ext := W_env + W_grav + sum_a W_a -- rather than written out here, so the
+    scenario exercises that assembly AND the angular-first ordering: put the support
     in the wrong slot and the residual no longer cancels.
+
+    The support acts at the box's BOTTOM FACE, not at its centre. That is deliberate:
+    routed through `external_wrench` it picks up the `p x f` moment transport, and a
+    centred force would have made the moment arm untestable here.
     """
     box = scene.objects["box"]
     G = spatial_inertia(box.mass, box.inertia)
 
-    support = ca.SX.zeros(6, 1)
-    support[_W_FORCE_Z] = f_z
-    W_ext = gravity_wrench(box.mass, ca.DM.eye(3), scene.gravity) + support
+    # Directly under the centre of mass, so the lever arm is zero and the box stays in
+    # equilibrium -- but it goes through the transport path all the same.
+    contact_point = np.array([0.0, 0.0, -box.half_extents[2]])
+    W_ext = external_wrench(
+        box.mass, ca.DM.eye(3), gravity=scene.gravity,
+        contacts=[(ca.DM([0.0, 0.0, f_z]), ca.DM.zeros(3), ca.DM(contact_point.reshape(3, 1)))],
+    )
 
     block = object_newton_euler(ca.SX.zeros(6, 1), ca.SX.zeros(6, 1), W_ext, ca.DM(G))
     pose = pin.SE3(np.eye(3), np.array([0.45, 0.0, 0.45]))
@@ -945,7 +1039,14 @@ _SPIN_INERTIA = np.diag(
     ])
 )
 _SPIN_AXIS = np.array([1.0, 1.0, 1.0]) / np.sqrt(3.0)   # non-principal on purpose
-_SPIN_POSE = np.array([0.45, 0.0, 0.60])
+# Beside the robot, not in front of it. The probe is a scenario-owned body, so it must
+# not be drawn inside scene geometry -- and over the whole catalogue the box sweeps
+# through x in [0.17, 1.60] and z in [0.00, 1.09], because 7b-hand-* brings it up to
+# the wrist at chest height. There is no clear altitude directly in front of the robot,
+# so the probe goes out to the side instead.
+# `test_the_spin_probe_does_not_intersect_any_scene_object` checks this against EVERY
+# pose any scenario uses, not just the box's home pose.
+_SPIN_POSE = np.array([0.45, -0.95, 0.85])
 _SPIN_OMEGA_MAX = 4.0       # end of the sweep, rad/s
 _SPIN_STEPS = 81
 _SPIN_DURATION = (_SPIN_STEPS - 1) * _FRAME_DT
@@ -990,6 +1091,122 @@ def _build_11_spin(scene: Scene, omega: float):
     }
 
 
+
+# =============================================================================
+# Eq. 10a / 11a -- integration, validated on a hand-built trajectory
+#
+# These are the only constraints in Milestone 2 that need MORE THAN ONE state, so
+# they cannot be checked at a single configuration like everything else. The
+# tempting alternative is to leave them until the TO (Eq. 17) exercises them -- but
+# then their first outing is inside a solver, and a failed solve cannot distinguish
+# a bad transcription from a bad guess, bad scaling, or a genuinely infeasible
+# problem. `faro.scenarios.trajectories` writes the trajectory by hand instead.
+# =============================================================================
+_TRAJ_DT = 0.02
+_TRAJ_STEPS = 24
+
+
+def _ground_the_walk(scene: Scene, roll) -> None:
+    """Drop the whole trajectory so the lowest foot skims the floor.
+
+    A constant world-z shift applied to EVERY configuration, which leaves Eq. 10a
+    untouched: the recurrence is `q_{i+1}.p = q_i.p + R_i v_lin dt`, and shifting both
+    sides by the same vector cancels. Verified by the tests, which still see machine
+    zero afterwards.
+
+    Needed because the gait is prescribed kinematically, with no IK holding the stance
+    foot down -- so without this the robot walks a few centimetres above the ground.
+    The stance foot still breathes by ~1 cm over a stride; that is honest for a
+    prescribed gait, and closing it is exactly what the TO is for.
+    """
+    model = scene.robot.model
+    data = model.createData()
+    feet = [model.getFrameId(f"{side}_ankle_roll_link") for side in ("left", "right")]
+    lowest = np.inf
+    for q in roll.q:
+        pin.forwardKinematics(model, data, q)
+        pin.updateFramePlacements(model, data)
+        lowest = min(lowest, min(float(data.oMf[f].translation[2]) for f in feet))
+    for q in roll.q:
+        q[2] -= lowest
+
+
+def _robot_traj(scene: Scene, backward: bool):
+    from faro.scenarios.trajectories import robot_rollout
+
+    roll = robot_rollout(scene.robot.model, dt=_TRAJ_DT, steps=_TRAJ_STEPS,
+                         backward=backward, mass=total_mass(scene.robot.model),
+                         gravity=scene.gravity, q0=standing_configuration(scene))
+    _ground_the_walk(scene, roll)
+    return roll
+
+
+def _build_10a(scene: Scene, index: float, *, backward: bool):
+    """Fly the reference trajectory and read Eq. 10a's defect at each knot."""
+    roll = _robot_traj(scene, backward)
+    i = int(round(index))
+    cmodel = scene.robot.casadi_model()
+
+    block = robot_dynamics(
+        cmodel, cmodel.createData(),
+        ca.DM(roll.q[i].reshape(-1, 1)), ca.DM(roll.v[i].reshape(-1, 1)),
+        ca.DM(roll.h[i].reshape(6, 1)),
+        ca.DM(roll.q[i + 1].reshape(-1, 1)), ca.DM(roll.v[i + 1].reshape(-1, 1)),
+        ca.DM(roll.h[i + 1].reshape(6, 1)),
+        ca.DM(roll.vdot[i + 1].reshape(-1, 1)), ca.DM(roll.hdot.reshape(6, 1)),
+        roll.dt,
+    )
+    # Watch the BASE rows only. The floating base is where a transcription actually
+    # breaks -- revolute joints integrate correctly under plain addition, so a bug
+    # that only touches the exponential map hides in the joint rows.
+    watched = [f"10a:q[{k}]" for k in range(6)]
+    q_show = roll.q[i + 1]
+    return block, watched, {
+        "q": q_show, "patches": (), "status_at": q_show[:3].copy(),
+    }
+
+
+def _build_10a_backward(scene: Scene, index: float):
+    return _build_10a(scene, index, backward=True)
+
+
+_TRAJ_DT_MAX = 0.05
+
+
+def _build_10a_forward(scene: Scene, dt: float):
+    """Sweep the STEP SIZE, not the knot index.
+
+    Forward Euler is wrong at every knot including the first, so a knot sweep has no
+    zero-crossing to find -- it starts violated and stays violated. Sweeping dt gives
+    the honest crossing instead: the two transcriptions differ by
+    `(v_{i+1} - v_i) dt = vdot dt^2`, which vanishes only as dt -> 0. It also puts the
+    O(dt^2) scaling on screen, which is the real content: halve dt, quarter the defect.
+    """
+    from faro.scenarios.trajectories import robot_rollout
+
+    model = scene.robot.model
+    roll = robot_rollout(model, dt=max(dt, 0.0), steps=_TRAJ_STEPS, backward=False,
+                         mass=total_mass(model), gravity=scene.gravity,
+                         q0=standing_configuration(scene))
+    _ground_the_walk(scene, roll)
+    i = _TRAJ_STEPS - 1
+    cmodel = scene.robot.casadi_model()
+
+    block = robot_dynamics(
+        cmodel, cmodel.createData(),
+        ca.DM(roll.q[i].reshape(-1, 1)), ca.DM(roll.v[i].reshape(-1, 1)),
+        ca.DM(roll.h[i].reshape(6, 1)),
+        ca.DM(roll.q[i + 1].reshape(-1, 1)), ca.DM(roll.v[i + 1].reshape(-1, 1)),
+        ca.DM(roll.h[i + 1].reshape(6, 1)),
+        ca.DM(roll.vdot[i + 1].reshape(-1, 1)), ca.DM(roll.hdot.reshape(6, 1)),
+        roll.dt,
+    )
+    q_show = roll.q[i + 1]
+    return block, [f"10a:q[{k}]" for k in range(6)], {
+        "q": q_show, "patches": (), "status_at": q_show[:3].copy(),
+    }
+
+
 # =============================================================================
 # Eq. 13b / 13c -- the limits that need velocities and torques
 # =============================================================================
@@ -1016,7 +1233,12 @@ def _joint_axis_world(scene: Scene, joint: str, q) -> tuple[np.ndarray, np.ndarr
 
 def knee_velocity_limit(scene: Scene) -> float:
     model = scene.robot.model
-    return float(model.velocityLimit[model.joints[model.getJointId("left_knee_joint")].idx_v])
+    # `default_velocity_limits`, not `model.velocityLimit`: Pinocchio reports 0 for any
+    # joint whose URDF omits a velocity limit, and 0 as a BOUND freezes that joint solid
+    # and makes Eq. 13b violated at every non-zero rate. The G1 happens to specify all
+    # 29, so the raw array works here -- but the robot is meant to be swappable, and a
+    # model with one missing limit would fail in a way that looks like a solver bug.
+    return float(default_velocity_limits(model)[model.joints[model.getJointId("left_knee_joint")].idx_v])
 
 
 def knee_torque_limit(scene: Scene) -> float:
@@ -1037,18 +1259,6 @@ def knee_torque_limit(scene: Scene) -> float:
 _SPEED_STEPS = 121          # sweep length; resolve_predictions builds `values` to match
 _SPEED_MARGIN = 1.2         # 13b sweeps 20% past v_max so the crossing is interior
 
-# SLOW MOTION. The G1's knee is rated at 20 rad/s and its range is only 2.97 rad, so
-# at full speed it crosses the whole range in four frames -- on screen that is not
-# "fast", it is a flicker with no readable direction. Playing the motion at 1/6 speed
-# keeps roughly twenty frames per traverse, which reads as a fast swing.
-#
-# This changes the PLAYBACK RATE, never the physics: the constraint is still evaluated
-# at the true swept velocity, and the crossing still lands on the URDF's v_max. The
-# frame-to-frame angle is `v * dt / _SLOWDOWN`, so it stays exactly proportional to
-# the rate under test -- which is what `test_velocity_scenarios_actually_move_the_joint`
-# checks. The banner in `expect` tells the viewer it is slowed, so the speed on screen
-# is never mistaken for the number in the terminal.
-_SLOWDOWN = 6.0
 
 
 def _fold_into(angle: float, lo: float, hi: float) -> float:
@@ -1098,7 +1308,7 @@ def _build_13b_speed(scene: Scene, speed: float):
     v[idx] = speed
 
     actuated = actuated_slice(model, velocity=True)
-    v_max = model.velocityLimit[actuated]
+    v_max = default_velocity_limits(model)[actuated]
     block = joint_velocity_limits(
         ca.DM(v[actuated].reshape(-1, 1)),
         ca.DM(-v_max.reshape(-1, 1)),
@@ -1112,7 +1322,7 @@ def _build_13b_speed(scene: Scene, speed: float):
     # the violation, and it happens on the frame where the swing visibly outruns the
     # joint's rated speed.
     origin, axis = _joint_axis_world(scene, "left_knee_joint", q)
-    limit = float(model.velocityLimit[idx])
+    limit = float(default_velocity_limits(model)[idx])
     return block, [f"13b:v<=max[{knee}]", f"13b:v>=min[{knee}]"], {
         "q": q, "patches": (), "status_at": origin,
         "vectors": [
@@ -1527,6 +1737,75 @@ ALL_SCENARIOS: list[Scenario] = [
         tolerance=2e-3,
     ),
     Scenario(
+        key="10-swing",
+        equation="10",
+        title="Swing the arms with the feet planted -- where does the momentum come from?",
+        question="Why does Eq. 10b need `h = A(q) v` as a separate constraint?",
+        expect="WATCH: the feet never move and nothing pushes the robot, but the arms "
+               "swing faster every frame and the purple arrow -- the centroidal ANGULAR "
+               "momentum -- grows out of nothing. That is real momentum generated by "
+               "joint motion alone; it is how a cat rights itself in mid-air. The sweep "
+               "claims h = 0 throughout, so the residual IS that momentum and the claim "
+               "is false the instant anything moves. This is the row the static "
+               "scenarios cannot test: 10-weight and 10-moment both pin v = 0, and at "
+               "v = 0 the residual h - A(q)v vanishes for ANY matrix A -- a completely "
+               "wrong centroidal map would pass both of them. PLAYED AT 1/6 SPEED.",
+        param_label="shoulder swing rate [rad/s]",
+        values=np.linspace(0.0, _SWING_RATE_MAX, _SWING_STEPS),
+        predicted_crossing=0.0,
+        prediction_note="Eq. 10b: h = A(q) v. With h claimed as 0, the residual is "
+                        "A(q)v, non-zero for any joint motion -- so it fails at rate > 0.",
+        build=_build_10_swing,
+        tolerance=3e-2,
+    ),
+    Scenario(
+        key="10a-rollout",
+        equation="10",
+        title="Walk a hand-built trajectory  [NEVER VIOLATES]",
+        question="Is Eq. 10a's transcription right, checked WITHOUT a solver?",
+        expect="WATCH: the robot WALKS -- legs swinging in antiphase, each foot lifting "
+               "about 9 cm in turn, arms counter-swinging, torso advancing 0.38 m while "
+               "swaying +-3.6 degrees. Every joint stays inside its Eq. 13a limits. The "
+               "trajectory is written by hand to satisfy Eq. 10a exactly, and the defect "
+               "stays at MACHINE ZERO (~1e-18) at every knot. The torso YAW is not "
+               "decoration: the floating base is quaternion-parameterised and is the "
+               "only part a naive `q + v dt` breaks, so a motion whose base merely "
+               "translated would hide the bug -- revolute joints integrate correctly "
+               "under plain addition. This exists so Eq. 10a is validated BEFORE the TO: "
+               "if an integrator's first outing is inside a solver, a failed solve "
+               "cannot separate a bad transcription from a bad guess or bad scaling. "
+               "NOTE the scope -- 10a is a KINEMATIC identity. Making 10a and 10b hold "
+               "TOGETHER has no closed-form rollout; that coupling is the TO's job.",
+        param_label="knot index",
+        values=np.arange(0.0, float(_TRAJ_STEPS)),
+        predicted_crossing=None,
+        prediction_note="Eq. 10a holds by construction on this trajectory, so the "
+                        "defect is zero at every knot and every dt.",
+        build=_build_10a_backward,
+    ),
+    Scenario(
+        key="10a-forward",
+        equation="10",
+        title="The same motion, transcribed with FORWARD Euler",
+        question="Does our Eq. 10a really use v_{i+1}, or did v_i sneak in?",
+        expect="The same walk, one index changed in the transcription -- "
+               "and the defect is non-zero from the very first knot. This is the check "
+               "that we implemented BACKWARD Euler, as the paper writes it, and not the "
+               "forward variant that still 'works' and is a different (less stable) "
+               "problem. The defect scales as O(dt^2): halving dt divides it by exactly "
+               "4, which is the local truncation error of a first-order method and is "
+               "verified over four step sizes in tests/test_trajectories.py.",
+        param_label="step size dt [s]",
+        values=np.linspace(0.0, _TRAJ_DT_MAX, 101),
+        predicted_crossing=0.0,
+        prediction_note="Eq. 10a uses v_{i+1}; forward Euler uses v_i. They differ by "
+                        "(v_{i+1} - v_i) dt = "
+                        "vdot dt^2, which vanishes only as dt -> 0. So it fails at any "
+                        "dt > 0, and the defect quarters when dt halves.",
+        build=_build_10a_forward,
+        tolerance=1e-3,
+    ),
+    Scenario(
         key="11-hold",
         equation="11",
         title="Hold the box still against gravity",
@@ -1555,7 +1834,8 @@ ALL_SCENARIOS: list[Scenario] = [
         equation="11",
         title="Tumble an elongated object at constant rate, with nothing pushing it",
         question="What is the `-[ad_V]^T G V` term for, and when does it matter?",
-        expect="WATCH: a grey elongated slab tumbles about the diagonal axis, spinning "
+        expect="WATCH: a grey elongated slab, out to the robot's LEFT, tumbles about the "
+               "diagonal axis, spinning "
                "faster every frame. Yellow arrow = the spin rate you asked for. Purple "
                "arrow = the moment Eq. 11b says you MUST supply just to keep that spin "
                "steady -- and nothing is supplying it, so the constraint fails the "

@@ -85,7 +85,7 @@ as that milestone is built.
 |---|---|---|---|
 | 0 | Environment & scaffolding | `00_check_install.py` | **done** — 17/17 checks pass |
 | 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | **done** — 48/48 tests pass, branching factor 108 reproduced |
-| 2 | Shared constraints (Eqs. 7–13) | `02_constraint_playground.py` | **done** — 374 tests; 25/25 constraints fail exactly where predicted |
+| 2 | Shared constraints (Eqs. 7–13) | `02_constraint_playground.py` | **done** — 441 tests; 28/28 constraints fail exactly where predicted |
 | 3 | Mode/edge feasibility (Eq. 14) | `02_mode_edge_demo.py` | not started |
 | 4 | KSO (Eq. 15) | `03_kso_demo.py` | not started |
 | 5 | TO (Eq. 17) | `04_to_demo.py` | not started |
@@ -147,13 +147,13 @@ Console output should end with `Raw branching factor: 108`.
 ## Milestone 2 — seeing the constraints hold and break
 
 ```bash
-python scripts/02_constraint_playground.py --list       # 25 scenarios
+python scripts/02_constraint_playground.py --list       # 28 scenarios
 python scripts/02_constraint_playground.py              # animated in Meshcat
 python scripts/02_constraint_playground.py --no-viz     # headless table
 ```
 
 Each scenario sweeps one physical parameter and declares, **independently of the
-implementation**, where the paper's equation says the constraint must fail. All 25
+implementation**, where the paper's equation says the constraint must fail. All 28
 agree, most to machine precision. Highlights:
 
 - **`7d-roll` vs `7d-pitch`** — same foot, same load: roll fails at 6.0 Nm, pitch at

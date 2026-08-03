@@ -1,6 +1,6 @@
 # `faro.scenarios` — seeing the constraints hold and break
 
-Twenty-five physical stories, one per behaviour of Eqs. 7–13. Each sweeps **one**
+Twenty-eight physical stories, one per behaviour of Eqs. 7–13. Each sweeps **one**
 physical parameter and shows the constraint responding — in numbers, and in Meshcat.
 
 ```bash
@@ -42,7 +42,7 @@ the constraint *must* start failing, derived by hand from the equation and the
 scene's real numbers, **independently of the implementation**. The tests then compare
 prediction against measurement.
 
-All 25 currently agree, most to machine precision:
+All 28 currently agree, most to machine precision:
 
 | Scenario | Eq. | Predicted | Measured |
 |---|---|---|---|
@@ -66,6 +66,9 @@ All 25 currently agree, most to machine precision:
 | `9-drift` | 9 | **never** (frozen model) | never |
 | `10-weight` | 10 | 323.74 N | 323.74 |
 | `10-moment` | 10 | 0 m | 0.0000 |
+| `10-swing` | 10 | 0 rad/s | 0.0000 |
+| `10a-rollout` | 10a | **never** | never |
+| `10a-forward` | 10a | 0 s | 0.0000 |
 | `11-hold` | 11 | 19.62 N | 19.620 |
 | `11-spin` | 11 | 0 rad/s | 0.0000 |
 | `13a-knee` | 13a | 2.8798 rad | 2.8798 |
@@ -195,6 +198,78 @@ scenarios failed silently — the box drove clean through the platform and staye
 normal colour. Those now tint the body (`highlight_objects`) or drop a green/red bead
 at the joint (`status_at`), and `test_every_violating_scenario_shows_the_violation_on_screen`
 requires one of the two from any scenario whose sweep can fail.
+
+**`10a-rollout` / `10a-forward` — validating an integrator without a solver.**
+The robot **walks**: legs in antiphase, each foot lifting ~9 cm in turn, arms
+counter-swinging, torso advancing 0.38 m while swaying ±3.6°, every joint inside its
+Eq. 13a limits. That legibility is the point — an earlier version used random
+accelerations, which satisfied Eq. 10a just as exactly and was useless, because a robot
+tumbling through the air cannot be looked at and judged.
+Eqs. 10a and 11a are the only constraints here that span more than one state, so the
+tempting place to exercise them is inside the TO. That is the wrong place to exercise
+them *first*: if an integrator's debut is inside a solver and the solve fails,
+`Infeasible_Problem_Detected` cannot separate a bad transcription from a bad initial
+guess, bad scaling, or a genuinely infeasible problem — there is nothing to bisect.
+
+So [`trajectories.py`](trajectories.py) writes the trajectory by hand. `10a-rollout`
+flies one built to satisfy Eq. 10a exactly and the defect stays at **machine zero
+(~1e-18) at every knot and every dt**. `10a-forward` transcribes the *same motion* with
+`v_i` instead of `v_{i+1}` — forward Euler — and the defect is non-zero at any dt > 0.
+
+Two independent checks, and they test different things.
+
+**1. The defect.** Given `(q_i, q_{i+1}, v_{i+1})`, does the constraint row evaluate to
+zero? That is exactly what the NLP sees. Checked over four step sizes in
+`tests/test_trajectories.py`:
+
+| dt | backward-Euler defect | forward-Euler defect | ratio |
+|---|---|---|---|
+| 0.040 | 6.9e-18 | 3.018e-03 | |
+| 0.020 | 1.7e-18 | 7.545e-04 | 4.00× |
+| 0.010 | 2.2e-19 | 1.886e-04 | 4.00× |
+| 0.005 | 5.4e-20 | 4.715e-05 | 4.00× |
+
+Halving dt quarters the defect — exactly O(dt²), the local truncation error of a
+first-order method. A defect that merely *looks* small proves nothing; one that scales
+at the predicted rate is a measurement.
+
+**2. The convergence.** The defect check has a limit worth naming: the trajectory is
+*built* from the recurrence, so the answer is zero by construction. It proves the
+implementation matches the recurrence — not that the recurrence reproduces the true
+motion. So a second test marches forward with Eq. 10a from `q_0` alone and compares
+against a **closed-form** ground truth:
+
+| dt | base-rotation error | joint error | ratio |
+|---|---|---|---|
+| 0.0400 | 6.679e-02 | 4.341e-02 | |
+| 0.0200 | 3.307e-02 | 2.150e-02 | 2.02× |
+| 0.0100 | 1.645e-02 | 1.070e-02 | 2.01× |
+| 0.0050 | 8.207e-03 | 5.335e-03 | 2.00× |
+
+Halving dt **halves** the error — O(dt), first-order *global* convergence, which is
+what backward Euler must give. The ground truth is exact, not a fine-dt reference: the
+base twist is angular-only about a **fixed body axis**, so the rotations commute and the
+time-ordered exponential collapses to `R(t) = R₀·exp₃(z·∫ω)`. Comparing against our own
+integrator at small dt would have been circular.
+
+Two details make or break this test, and both bit during development:
+
+- the horizon is a **partial** period. Over a full one the rectangle sum of a cosine
+  cancels exactly, the error collapses to ~1e-16 at every dt, and the test passes while
+  measuring nothing;
+- dt must **divide** the horizon exactly. Using `round(horizon/dt)` ends each run at a
+  different time and the ratios come out as noise (1.12, 1.76, 3.22).
+
+A control test pins the difference between *wrong* and merely *coarse*: replacing the
+exponential map with plain addition on the quaternion makes the error **grow** as dt
+shrinks (0.119 → 0.245, ratio 0.62) rather than halving. Divergence, not inaccuracy. The base is given a real **angular** velocity
+on purpose: revolute joints integrate correctly under plain addition, so a bug that
+only breaks the exponential map would hide in a purely translating trajectory.
+
+**Scope, stated honestly:** Eq. 10a is a *kinematic* identity. Making 10a and 10b hold
+together — `h = A(q)v` at every knot *and* `hdot` the net external wrench — has no
+closed-form rollout. That coupling **is** the trajectory optimization, and it belongs
+to Milestone 5.
 
 **`10-weight` / `10-moment` — the centroidal dynamics, made static.**
 Eqs. 10 and 11 need velocities and accelerations, which a swept configuration does

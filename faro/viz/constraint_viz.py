@@ -410,9 +410,11 @@ class ConstraintOverlay:
         for path in sorted(self._active):
             self.viewer[path].delete()
         self._active.clear()
-        # Restore the standard patch AND object colours from Milestone 1, so a
-        # scenario that tinted the box red does not bleed into the next one.
+        # Restore the standard patch AND object colours from Milestone 1, and put
+        # every object back at its scene pose, so nothing a scenario did bleeds into
+        # the next one -- neither a red tint nor a box left floating in mid-air.
         self.vis._draw_patches()
+        self.vis.reset_object_poses()
         self.vis._draw_objects()
 
 
