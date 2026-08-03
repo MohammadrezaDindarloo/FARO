@@ -23,3 +23,11 @@ Build order is bottom-up; see README.md for milestone status.
 """
 
 __version__ = "0.0.1"
+
+# BEFORE ANY HEAVY IMPORT. Eq. 14's answer is a solver status, so a threaded BLAS's
+# non-deterministic reductions can flip a mode's verdict between identical calls --
+# measured, and it did. `OMP_NUM_THREADS` is only read when BLAS loads, so this has
+# to happen here and nowhere later. See faro/utils/determinism.py.
+from faro.utils.determinism import ensure_single_threaded_blas as _pin_blas  # noqa: E402
+
+_pin_blas()

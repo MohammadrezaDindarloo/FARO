@@ -10,6 +10,133 @@ robot: g1
 gravity: 9.81
 
 # ================================================================================
+# Friction -- paper Eqs. 7c and 7d. AMBIGUITY (docs/ambiguities.md #13): the paper
+# names mu and mu_r and never gives a value for either.
+#
+# These do NOT enter Eq. 14. That optimization cites only 7a, 7b, 9 and 13a -- it is
+# inverse kinematics, with no forces for friction to act on. They are declared here
+# so that the KSO (Eq. 15) and TO (Eq. 17) read them from config instead of finding
+# them typed into a constraint call, and so a sweep over friction is a config edit.
+#
+# mu: Coulomb, applied as the PYRAMIDAL approximation |f_x,y| <= mu f_z (Eq. 7c).
+#   0.6 is a standard rubber-on-hard-floor value and the G1's soles are rubber. Note
+#   the pyramid is INSCRIBED in the cone, so along a diagonal it permits only
+#   mu/sqrt(2) = 0.42 -- conservative, never optimistic, which is the right direction
+#   for a feasibility check.
+#
+# mu_torsional: the paper's mu_r, from |kappa_z| <= mu_r f_z (Eq. 7d). NOT
+#   dimensionless -- it is a LENGTH, since it relates a moment to a force. For a
+#   rectangular patch with roughly uniform pressure the limit is on the order of
+#   mu times a characteristic patch radius; the G1 sole is 0.17 x 0.06 m, giving
+#   ~0.6 * 0.04 = 0.024. Rounded to 0.02 to stay conservative.
+friction:
+  mu: 0.6
+  mu_torsional: 0.02
+
+# ================================================================================
+# Eq. 14's regularization weight W. AMBIGUITY (docs/ambiguities.md #22): the paper
+# names W and never gives a value.
+#
+# Everything is 1.0 -- the identity the paper's notation implies -- EXCEPT the torso
+# orientation, and that exception is worth reading.
+#
+# Eq. 14 has no gravity, no balance and no centre-of-mass condition; it is pure
+# inverse kinematics. Under W = I a torso tilted 78 degrees costs the same as one
+# finger joint being off by the same number, so the filter happily returns the robot
+# diving head-first over the box with its knees driven to their hyperextension limit.
+# That pose satisfies every constraint -- contacts at machine precision, zero
+# interpenetration, all joints in range -- and is still not an answer anyone wants out
+# of a kinematic filter. It also matters downstream: Alg. 1 warm-starts the KSO from
+# these configurations.
+#
+# Weighting the torso is the "stay upright" prior the paper never writes down.
+# Measured on the grasp mode: 1 -> 73 deg of lean, 10 -> 48 deg, 100 -> 16 deg (a deep
+# squat). 10 is the knee that the curve turns at.
+regularization:
+  base_position: 1.0
+  base_orientation: 10.0
+  joints: 1.0
+  object_position: 1.0
+  object_orientation: 1.0
+
+# ================================================================================
+# Collision -- paper Eq. 9. See docs/ambiguities.md #19 for the pair-set policy.
+# ================================================================================
+collision:
+  # The paper writes `0 <= sd`, i.e. no safety margin. Kept at 0.0 to match it. A few
+  # millimetres keeps Ipopt off the constraint boundary and usually helps convergence,
+  # but it also makes any pair the contact mode holds TOUCHING infeasible by
+  # construction -- a sole on the floor measures sd = 0.000000 exactly.
+  margin: 0.0
+
+  # Schulman et al.'s activation distance: a pair already this far apart cannot be
+  # driven into contact within one convex subproblem, so it gets no row. Every row that
+  # IS generated is exactly Eq. 9 -- this decides which rows can be active, not what
+  # they say. The paper cites Schulman for Eq. 9 and does not spell the threshold out
+  # (docs/ambiguities.md #19b).
+  #
+  # `null` = EVERY pair gets a row. This is our default by choice: the paper's Section
+  # IV-B gives the search a two-hour budget per run, so a slow-but-complete filter is
+  # in the spirit of the method, and nothing here is guessing which pairs matter.
+  #
+  # The knob is real and measured. At 0.10 m only 53 of the 689 pairs are active at the
+  # nominal pose and 52-64 at solved configurations -- a ~12x cut in rows, 6-20x faster,
+  # and identical verdicts on every entry we compared. Set it to 0.10 to get that.
+  #
+  # ONE CAVEAT ON THE BUDGET ARGUMENT, recorded so the trade-off is not lost: Table II's
+  # own counts bound the filter much harder than two hours does. On the hard task the
+  # M,E,KSO run spends ~850 s on 1415 KSO attempts and ~5150 s on 79.6 TO attempts, so
+  # ~1200 s is left for at least 2830 mode and edge checks -- under ~0.4 s each. Whatever
+  # the paper is doing here, it is not spending tens of seconds per mode.
+  activation_distance: null
+
+  # Schulman's approximation freezes the GJK witness points, so it is only valid near
+  # the point they were taken at. Eq. 14 is therefore solved as a short sequence:
+  # solve, re-query the witnesses at the answer, solve again. The paper does not
+  # describe this loop for Eq. 14 (docs/ambiguities.md #12b).
+  # The pairs the CONTACT MODE itself holds in contact (Eq. 7) get a RELAXED row here,
+  # `sd >= -1 mm`, rather than the hard `sd >= 0` -- and rather than being dropped.
+  #
+  # Three options, all measured on the ten-target tour, because the obvious two are
+  # both wrong in different directions:
+  #
+  #   hard sd >= 0   427 s   penetration <= 5 mm   -- exact, and every solve runs to
+  #                                                   the refresh cap. Those pairs sit
+  #                                                   at exactly sd = 0, so round-off
+  #                                                   reads as a hair of penetration and
+  #                                                   the audit never calls it clean.
+  #   dropped        238 s   penetration 128 mm    -- fastest, and wrong. A patch is not
+  #                                                   a body: the hand patch is a 27x30
+  #                                                   mm window on the whole forearm
+  #                                                   hull, so dropping the pair stops
+  #                                                   constraining the forearm at all.
+  #                                                   `lift` came back feasible with the
+  #                                                   arm 12.8 cm inside the box.
+  #   relaxed 1 mm   294 s   penetration <= 0.5 mm -- 1 mm of slack is enough for the
+  #                                                   refresh loop to converge, and not
+  #                                                   nearly enough for a forearm to
+  #                                                   vanish into a box.
+  #
+  # `max_penetration` is audited over EVERY pair including these, which is how the
+  # 12.8 cm was caught rather than shipped.
+  relax_contact_pairs: true
+  contact_pair_margin: -1.0e-3
+
+  # A CAP, not a schedule. The loop stops when the configuration has settled AND the
+  # answer is collision-free against all pairs; it was a fixed 3, and that produced a
+  # converged, "feasible" grasp sitting 9.3 cm inside the box with every collision row
+  # satisfied -- because each row was linearized at the previous iterate. Reaching this
+  # cap is not silent: `FeasibilityReport.max_penetration` reports what is left.
+  #
+  # 20, raised from 10 when `base_orientation` went to 10.0. The more upright torso
+  # brings the hip against the box on `lift`, and that pair converges slowly rather
+  # than oscillating: 11.2 mm of penetration left at a cap of 10, exactly 0 at 20, and
+  # no further change at 40. Easy modes still break out in 2-7 passes, so the cap only
+  # costs where it is needed.
+  refresh_iterations: 20
+  refresh_tolerance: 1.0e-4
+
+# ================================================================================
 # Movable objects (paper Eq. 5b / Eq. 11 -- own pose, own dynamics, NOT part of the
 # robot model).
 # ================================================================================

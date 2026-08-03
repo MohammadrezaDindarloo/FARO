@@ -86,11 +86,11 @@ as that milestone is built.
 | 0 | Environment & scaffolding | `00_check_install.py` | **done** — 17/17 checks pass |
 | 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | **done** — 48/48 tests pass, branching factor 108 reproduced |
 | 2 | Shared constraints (Eqs. 7–13) | `02_constraint_playground.py` | **done** — 441 tests; 28/28 constraints fail exactly where predicted |
-| 3 | Mode/edge feasibility (Eq. 14) | `02_mode_edge_demo.py` | not started |
-| 4 | KSO (Eq. 15) | `03_kso_demo.py` | not started |
-| 5 | TO (Eq. 17) | `04_to_demo.py` | not started |
-| 6 | Tree search (Alg. 1) | `05_tree_search_demo.py` | not started |
-| 7 | LLM contact-plan sampling | `06_llm_sampling_demo.py` | not started |
+| 3 | Mode/edge feasibility (Eq. 14) | `03_mode_feasibility.py` | **in progress** — Eq. 14 complete: contact (7a/7b) + **collision (9, 689 pairs)** + limits (13a), Ipopt as the paper specifies |
+| 4 | KSO (Eq. 15) | `04_kso_demo.py` | not started |
+| 5 | TO (Eq. 17) | `05_to_demo.py` | not started |
+| 6 | Tree search (Alg. 1) | `06_tree_search_demo.py` | not started |
+| 7 | LLM contact-plan sampling | `07_llm_sampling_demo.py` | not started |
 
 ## Stack
 

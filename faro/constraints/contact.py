@@ -35,13 +35,15 @@ import casadi as ca
 from faro.constraints.block import ConstraintBlock
 from faro.constraints.frames import (
     log3,
+    normal_alignment_rows,
     relative_patch_transform,
     rotated_half_extent_rows,
 )
 
 
 def contact_kinematic(
-    R_a, p_a, R_b, p_b, xi_a, xi_b, *, name: str = "contact", flip_b: bool = True
+    R_a, p_a, R_b, p_b, xi_a, xi_b, *, name: str = "contact", flip_b: bool = True,
+    alignment: str = "log3",
 ) -> ConstraintBlock:
     """Eqs. 7a + 7b: the purely geometric part of patch-to-patch contact.
 
@@ -51,10 +53,15 @@ def contact_kinematic(
     R_b, p_b : same for patch b.
     xi_a, xi_b : half-extents (2-vectors) of each patch, in its own frame.
     flip_b : apply FARO's outward-normal reconciliation (see `frames.py`).
+    alignment : which form of Eq. 7a's normal-alignment condition to emit,
+        `"log3"` (the paper's literal expression, the default) or `"column"` (an
+        equivalent form without log3's singularity at a half-turn of relative yaw).
+        See `normal_alignment_rows`; the two define the same feasible set.
 
     Returns
     -------
-    ConstraintBlock with 3 equalities (7a) and 16 inequalities (7b).
+    ConstraintBlock with 3 equalities (7a) and 16 inequalities (7b) in the `log3`
+    form; the `column` form has the same 3 equalities and one extra inequality.
 
     Eq. 7a contributes THREE equalities, not two: `log3(R)_{x,y} = 0` is two rows
     (normal alignment, leaving yaw free) plus `p_z = 0` (zero separation).
@@ -68,9 +75,11 @@ def contact_kinematic(
     # log3(R)_{x,y} = 0 forces the relative rotation to be a pure yaw: the patch
     # normals align while the in-plane yaw stays FREE (an unconstrained foot can
     # still rotate about the contact normal). p_z = 0 is zero normal separation.
-    omega = log3(R_rel)
-    eq = ca.vertcat(omega[0], omega[1], p_rel[2])
-    eq_labels = ["7a:log3(R)_x", "7a:log3(R)_y", "7a:p_z"]
+    align_eq, align_eq_labels, align_ineq, align_ineq_labels = normal_alignment_rows(
+        R_rel, alignment
+    )
+    eq = ca.vertcat(*align_eq, p_rel[2])
+    eq_labels = [*align_eq_labels, "7a:p_z"]
 
     # --- (7b) -----------------------------------------------------------------
     # |p_{x,y}| <= ^b xi_b - ^b xi_a.  ^b xi_b is just b's own half-extents (it is
@@ -83,8 +92,8 @@ def contact_kinematic(
     # the initial guess of every solve. See `rotated_half_extent_rows`.
     rows_x, labels_x = rotated_half_extent_rows(R_rel, p_rel, xi_a, xi_b, 0)
     rows_y, labels_y = rotated_half_extent_rows(R_rel, p_rel, xi_a, xi_b, 1)
-    ineq = ca.vertcat(rows_x, rows_y)
-    ineq_labels = labels_x + labels_y
+    ineq = ca.vertcat(rows_x, rows_y, *align_ineq)
+    ineq_labels = labels_x + labels_y + align_ineq_labels
 
     return ConstraintBlock(name=name, eq=eq, ineq=ineq, eq_labels=eq_labels, ineq_labels=ineq_labels)
 

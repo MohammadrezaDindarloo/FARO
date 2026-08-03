@@ -34,6 +34,19 @@ class Scene:
     patches: dict[str, ContactPatch] = field(default_factory=dict)
     interfaces: dict[str, Interface] = field(default_factory=dict)
     gravity: float = 9.81
+    #: Eqs. 7c/7d coefficients: `{"mu": ..., "mu_torsional": ...}`. Not used by
+    #: Eq. 14 -- see the config file for why they live here anyway.
+    friction: dict = field(default_factory=lambda: {"mu": 0.6, "mu_torsional": 0.02})
+    #: Eq. 14's W, by group. See `RegularizationWeights` and the config file.
+    regularization: dict = field(default_factory=lambda: {
+        "base_position": 1.0, "base_orientation": 10.0, "joints": 1.0,
+        "object_position": 1.0, "object_orientation": 1.0,
+    })
+    #: Eq. 9 settings: `margin`, `refresh_iterations`, `refresh_tolerance`.
+    collision: dict = field(default_factory=lambda: {
+        "margin": 0.0, "activation_distance": None, "relax_contact_pairs": True, "contact_pair_margin": -1.0e-3,
+        "refresh_iterations": 20, "refresh_tolerance": 1.0e-4,
+    })
 
     # ------------------------------------------------------------------ loading
     @classmethod
@@ -43,6 +56,11 @@ class Scene:
 
         robot = RobotModel.from_config(cfg["robot"])
         scene = cls(name=cfg.get("name", "scene"), robot=robot, gravity=float(cfg.get("gravity", 9.81)))
+        # Merged onto the defaults rather than replacing them, so a config that names
+        # only `mu` does not silently drop `mu_torsional` to nothing.
+        scene.friction = {**scene.friction, **(cfg.get("friction") or {})}
+        scene.collision = {**scene.collision, **(cfg.get("collision") or {})}
+        scene.regularization = {**scene.regularization, **(cfg.get("regularization") or {})}
 
         # --- movable objects, each contributing its own face patches -----------
         for obj_name, obj_cfg in (cfg.get("objects") or {}).items():
@@ -126,6 +144,33 @@ class Scene:
         return problems
 
     # ------------------------------------------------------------------ queries
+    def nominal_configuration(self) -> np.ndarray:
+        """`q_nom`: the robot's nominal posture, STANDING ON THE FLOOR.
+
+        `RobotModel.q_nominal` sets joint angles on top of `pin.neutral`, which leaves
+        the floating base at the world origin -- so the pelvis is at z = 0 and the
+        feet are 0.78 m underground. That was invisible for as long as nothing
+        measured the robot against the environment. Eq. 9 measures exactly that: at
+        the raw nominal, seven robot links interpenetrate the floor slab, the deepest
+        by 6.7 cm, so Eq. 14 would start from a point that violates the collision
+        constraint before the contacts are even considered.
+
+        Grounding it here rather than in the YAML keeps the posture and the standing
+        height from drifting apart: change a leg angle and the base height follows.
+
+        Falls back to the raw nominal if the scene declares no robot-attached patches
+        to stand on -- a scene with no feet has no floor to be grounded to.
+        """
+        q = self.robot.q_nominal.copy()
+        soles = [
+            p for p in self.patches_by_attachment(Attachment.ROBOT)
+            if "foot" in p.name or "sole" in p.name
+        ]
+        if not soles:
+            return q
+        q[2] -= min(self.patch_world_placement(p, q).translation[2] for p in soles)
+        return q
+
     def branching_factor(self) -> int:
         """Size of the discrete action set at one tree-search node (Alg. 1).
 

@@ -1,0 +1,62 @@
+# Ipopt settings for the mode/edge feasibility NLP, paper Eq. 14.
+#
+# The paper solves Eq. 14 with Ipopt specifically:
+#
+#   "The mode/edge optimizations (14) are solved with Ipopt."   -- Section II-G
+#
+# so this is the one stage where our solver choice matches the paper's exactly.
+#
+# WHY THIS FILE IS NOT `ipopt_default.yaml`
+# -----------------------------------------
+# Eq. 14 is a small inverse-kinematics problem (43 variables for `box_placement`)
+# solved thousands of times inside Alg. 1's tree search. `ipopt_default.yaml` is
+# aimed at the TO of Eq. 17: a few thousand variables solved once. The settings that
+# matter pull in opposite directions, `max_iter` above all.
+
+backend: ipopt
+
+ipopt:
+  # --- THE feasibility knob -------------------------------------------------
+  # Section II-D defines the verdict in terms of this number and never gives it:
+  #
+  #   "A contact mode c is said to be infeasible if the resulting nonlinear program
+  #    does not converge within a number of maximum iterations."
+  #
+  # It is therefore a direct false-negative/speed trade-off, and it is the same knob
+  # the paper blames for the false negatives it does observe:
+  #
+  #   "The few observed false negatives were primarily associated with poor
+  #    initialization or insufficient solver iterations."   -- Section IV-C
+  #
+  # 1000, and the number moved once Eq. 9 was added -- which is the point worth
+  # recording. WITHOUT collision every mode that converges does so in under 50
+  # iterations and 300 was ~6x headroom. WITH collision's ~690 extra inequality rows
+  # the same grasp mode needs several hundred on its first pass, and capping at 300
+  # turned it into a false negative: at max_iter = 3000 it converges, and the final
+  # refresh pass then takes 26 iterations.
+  #
+  # So this knob is not a performance setting, it is the false-negative rate, and it
+  # has to be re-measured whenever the constraint set changes.
+  # See docs/ambiguities.md #24.
+  max_iter: 1000
+
+  # --- convergence ----------------------------------------------------------
+  # A feasibility question does not need the last digits of the optimum: what is
+  # being asked is whether a configuration EXISTS. `acceptable_*` is what lets a
+  # solve that has found a good point stop instead of polishing it, and
+  # `Solved_To_Acceptable_Level` counts as converged in faro/solvers/nlp.py.
+  tol: 1.0e-6
+  constr_viol_tol: 1.0e-6
+  acceptable_tol: 1.0e-4
+  acceptable_iter: 10
+
+  linear_solver: mumps
+  print_level: 0
+  sb: "yes"
+
+  nlp_scaling_method: gradient-based
+  mu_strategy: adaptive
+  hessian_approximation: exact
+
+casadi:
+  print_time: false

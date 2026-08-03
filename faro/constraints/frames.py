@@ -100,6 +100,74 @@ def log3(R):
     return cpin.log3(as_sx(R))
 
 
+def normal_alignment_rows(R, form: str = "log3"):
+    """Eq. 7a's normal-alignment condition, in either of two EQUIVALENT forms.
+
+    The paper writes `log3(R)_{x,y} = 0`: the relative rotation's axis lies along z,
+    so the patch normals coincide and only the in-plane yaw is free. That is the
+    right condition, and `form="log3"` is it, verbatim.
+
+    THE PROBLEM WITH WRITING IT THAT WAY IN A SOLVER -- MEASURED, NOT EXPLAINED
+    ---------------------------------------------------------------------------
+    Inside Eq. 14 the log3 form makes Ipopt fail with `Invalid_Number_Detected`: a
+    NaN in the Lagrangian Hessian, reported at the box and base quaternion entries.
+    What is established:
+
+      * it is reproducible -- the grasp and place modes and the grasp->front edge all
+        fail with it and all solve without it (tests/test_mode_edge.py);
+      * it is not an artifact of row order: shuffling the five contact blocks fails
+        under the log3 form in every ordering tried and succeeds under this one in
+        every ordering tried;
+      * where both forms converge they reach the same optimum to 1e-6, which is the
+        equivalence showing up end to end.
+
+    An attempt to localize it further, by putting the log3 form on one contact pair at
+    a time, appeared to blame the pairs already aligned at the nominal pose -- and
+    then did not replicate under a different pair ordering. So no per-pair attribution
+    is claimed.
+
+    What is NOT established is the mechanism. `log3` was probed in isolation at
+    theta = 0, at theta = pi, and on the non-orthogonal matrices a non-unit quaternion
+    produces, and its value, Jacobian and Hessian were finite in every case; random
+    probing of the assembled rows and of the full Lagrangian Hessian did not
+    reproduce it either. So the NaN needs the whole expression graph and the solver's
+    own trial points, and the honest statement is that the log3 form is empirically
+    fragile here for a reason not yet pinned down. Recorded as an open question in
+    docs/ambiguities.md #23 rather than written up as a theory.
+
+    THE EQUIVALENT SMOOTH FORM
+    --------------------------
+    "The patch normals are aligned with their local z-axes" (Section II-C 1), so
+    alignment is a statement about ONE COLUMN of R -- its third:
+
+        R[0,2] = 0,   R[1,2] = 0,   and   R[2,2] >= 0.
+
+    The two equalities say the a-frame's z-axis has no component along b's x or y;
+    orthonormality then forces R[2,2] = +-1, and the inequality picks +1 (aligned)
+    over -1 (back-to-back). Same feasible set as the log3 form -- `tests/
+    test_mode_edge.py` checks that on random rotations -- but every row is LINEAR in
+    the entries of R, so there is nothing in it that can produce a NaN anywhere in
+    SO(3) -- which is why it is the default for the solver stages even without a
+    diagnosis of what the log3 form does.
+
+    The cost is one extra row and a departure from the paper's literal notation, which
+    is why both forms are kept and the choice is explicit. See docs/ambiguities.md #23.
+
+    Returns `(eq_rows, eq_labels, ineq_rows, ineq_labels)`; the log3 form returns
+    empty inequality lists.
+    """
+    if form == "log3":
+        omega = log3(R)
+        return [omega[0], omega[1]], ["7a:log3(R)_x", "7a:log3(R)_y"], [], []
+    if form == "column":
+        # `-R[2,2] <= 0` in FARO's `ineq <= 0` convention.
+        return (
+            [R[0, 2], R[1, 2]], ["7a:R_xz", "7a:R_yz"],
+            [-R[2, 2]], ["7a:R_zz>=0"],
+        )
+    raise ValueError(f"unknown alignment form {form!r}; expected 'log3' or 'column'")
+
+
 def rotated_half_extents(R, xi_a):
     """Half-extents of patch a expressed in frame b -- the paper's `^b xi_a` (Eq. 7b).
 

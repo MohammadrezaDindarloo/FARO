@@ -136,19 +136,41 @@ def query_witness(geom_A, tf_A, geom_B, tf_B) -> WitnessData:
     # Direction from B's witness point toward A's.
     delta = w_A - w_B
     norm = float(np.linalg.norm(delta))
-    if norm < 1e-9:
-        # Touching exactly: the witness points coincide, so the difference carries no
-        # direction. Fall back to coal's own normal.
+    if norm >= 1e-9:
+        normal = delta / norm
+    else:
+        # TOUCHING EXACTLY. The witness points coincide, so their difference carries no
+        # direction -- and this is not a corner case here, it is the normal state of
+        # affairs: every contact the mode asserts sits at sd = 0.000000 by construction,
+        # a sole on the floor and a box bottom on a platform included.
+        #
+        # Fall back in order of how much each source knows:
+        #   1. coal's own separating normal, which is correct for exact face-on-face
+        #      contact between convex bodies and is what it reports there;
+        #   2. failing that, centre to centre. Crude, but always defined for distinct
+        #      bodies and pointing the right way for two convex sets in contact -- and
+        #      Eq. 9 is a first-order model that the refresh loop re-linearizes anyway,
+        #      so a slightly wrong direction at a touching pair costs an iteration, not
+        #      correctness.
+        #
+        # Raising instead, which is what this used to do, means one degenerate pair out
+        # of ~700 aborts the whole solve and reports nothing about the mode.
+        # `np.isfinite` as well as the norm: coal returns a NaN normal for some exactly
+        # touching pairs, and NaN fails `< 1e-9`, so a norm test alone lets it straight
+        # through into Eq. 9. It surfaces much later as `Invalid_Number_Detected` with
+        # nothing pointing back here.
         normal = np.asarray(result.normal, dtype=float)
         n_norm = float(np.linalg.norm(normal))
-        if n_norm < 1e-9:
+        if not np.isfinite(normal).all() or n_norm < 1e-9:
+            normal = t_A - t_B
+            n_norm = float(np.linalg.norm(normal))
+        if not np.isfinite(normal).all() or n_norm < 1e-9:
             raise RuntimeError(
-                "GJK returned coincident witness points and a degenerate normal; "
-                "cannot build Eq. 9 at this configuration."
+                "GJK returned coincident witness points, a degenerate normal, AND "
+                "coincident body origins; Eq. 9 has no direction to work with here. "
+                "Two bodies are exactly co-located, which is a scene definition error."
             )
         normal = normal / n_norm
-    else:
-        normal = delta / norm
 
     # ORIENT THE NORMAL BY THE SIGN OF THE DISTANCE. This is the whole reason Eq. 9
     # is a *signed* distance, and getting it wrong is silent and inverted:
