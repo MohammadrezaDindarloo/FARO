@@ -1,0 +1,7 @@
+# Robot vs box and robot vs platform, with NO cutoff -- every one of those 72 pairs
+# gets a row at every pass. Self-collision still not modelled.
+# Isolates "does the cutoff cost me anything on the task pairs?" from everything else.
+name: task_only_full
+include_pairs: [robot-box, robot-tabletop]
+always_active: []
+activation_distance: null

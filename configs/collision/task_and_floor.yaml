@@ -1,0 +1,6 @@
+# As `task_always_on`, plus the floor. The floor is the surface a robot has actually
+# been seen to tunnel through (see `environment_bodies`, floor_thickness).
+name: task_and_floor
+include_pairs: all
+always_active: [box, tabletop, floor]
+activation_distance: 0.10

@@ -1,0 +1,12 @@
+# The cutoff, EXCEPT that everything touching the box or the platform always gets a
+# row however far away it is.
+#
+# The cutoff assumes a pair cannot close within one step, which is a claim about how
+# far a body can travel. True for robot links (bounded by kinematics), NOT true for
+# the box -- its pose is a free decision variable, so the solver can move it
+# arbitrarily in a single pass. On the ten-target tour the worst-penetration pair
+# involved the box or platform in 9 of 9 feasible entries; never a self-collision.
+name: task_always_on
+include_pairs: all
+always_active: [box, tabletop]
+activation_distance: 0.10

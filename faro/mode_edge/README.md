@@ -180,6 +180,37 @@ all ten tour entries flip to infeasible. The paper's `margin = 0` is not just it
 choice — it is the only one available unless the mode's own contact pairs are excluded
 from Eq. 9, which is a package deal, not an independent knob.
 
+## Where the time goes (and why the printed ms is not it)
+
+Profiled on `grasp`, all 689 pairs, reproducible run to run:
+
+```
+check() total                     32.9 s
+  pass 1   28.9 s   772 iters   Infeasible_Problem_Detected   <- 87%, discarded
+  pass 2    2.0 s    51 iters   Solve_Succeeded
+  pass 3    0.9 s     9 iters   Solve_Succeeded               <- the one reported
+```
+
+| | share |
+|---|---|
+| Ipopt iterating | 89% |
+| `ca.nlpsol` rebuilding the Jacobian/Hessian graphs | 6% |
+| GJK witness queries + 689 CasADi rows | 3% |
+| the all-pairs penetration audit | 0.2% |
+
+Two things follow. **Building the NLP is not the bottleneck** — rebuilding it from
+scratch every pass costs 6%, so caching it would buy almost nothing. **Pass 1 is
+practically the whole cost**, and its answer is thrown away: linearized at `q_nom`, the
+689 collision rows describe geometry the solution is nowhere near, so Ipopt grinds to
+772 iterations and reports `Infeasible_Problem_Detected`. Re-linearized once at that
+bad-but-closer point, pass 2 converges in 51.
+
+So `result.wall_time` is the **last** pass, and the last pass is by construction the
+cheapest one in the sequence — it starts from the previous answer and only confirms it.
+`FeasibilityReport.wall_time` is the number to quote; on `grasp` they are 0.24 s and
+33 s. This mattered beyond cosmetics: the ~0.4 s per check that Table II implies has to
+be compared against the outer number, not the inner one.
+
 ## Cost, and the knob you may want
 
 Every pair gets a row by default (`activation_distance: null`), which is the slow and

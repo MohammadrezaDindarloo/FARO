@@ -1,0 +1,12 @@
+# Robot vs box and robot vs platform ONLY. Robot self-collision is not modelled at
+# all -- 579 of the 689 pairs are gone, and nothing is watching whether the robot
+# passes through its own arm.
+#
+# This is a MODELLING choice, not a speed setting, and it is the one scenario here
+# that can return a physically impossible answer rather than merely a slow one. It is
+# provided because it is the cheapest possible upper bound: if a mode is infeasible
+# even here, no richer pair set will rescue it.
+name: no_self_collision
+include_pairs: [robot-box, robot-tabletop]
+always_active: [box, tabletop]
+activation_distance: 0.10

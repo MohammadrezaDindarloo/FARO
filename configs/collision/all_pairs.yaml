@@ -1,0 +1,6 @@
+# Every pair, every pass. The complete and slow baseline -- the reference the others
+# are judged against, not a recommendation.
+name: all_pairs
+include_pairs: all
+always_active: []
+activation_distance: null

@@ -245,20 +245,134 @@ def test_the_scene_config_supplies_w_and_it_reaches_the_cost(scene):
     AND in the assembled cost. Reading it into a dataclass that the NLP never consults
     would pass a shallower test and change nothing about the answer.
     """
+    # Whatever the YAML currently says -- these are TUNING values and are meant to be
+    # edited. Pinning the numbers here made this test fail on exactly the knob it
+    # exists to prove is live, twice: once when `hip` went to 2.0 and once when
+    # `base_orientation` came back to 1.0.
+    declared = scene.regularization
     weights = RegularizationWeights.from_scene(scene)
-    assert weights.base_orientation == pytest.approx(10.0)
-    assert weights.joints == pytest.approx(1.0)
+    assert weights.base_orientation == pytest.approx(float(declared["base_orientation"]))
+    assert weights.joints == pytest.approx(float(declared["joints"]))
 
     problem, sym = build_problem(scene, STAND)   # no explicit weights -> from config
     cost = ca.Function("f", [problem.variables], [problem.cost])
     nominal = sym.nominal()
 
-    # Tip the base quaternion and a joint by the same amount; orientation must cost 10x.
+    # Compare the base quaternion against a real joint, at that joint's OWN resolved
+    # weight -- which is the fallback only if no group matches it.
+    model = scene.robot.model
+    joint_name = scene.robot.actuated_joint_names[0]
+    idx_q = model.joints[model.getJointId(joint_name)].idx_q
+    joint_weight = weights.weight_for_joint(joint_name)
+
+    # Tip both by the same amount; the costs must be in the ratio of their weights.
     tilted = nominal.copy()
     tilted[3] += 0.01
     bent = nominal.copy()
-    bent[7] += 0.01
-    assert float(cost(tilted)) == pytest.approx(10.0 * float(cost(bent)), rel=1e-9)
+    bent[idx_q] += 0.01
+    assert float(cost(tilted)) * joint_weight == pytest.approx(
+        weights.base_orientation * float(cost(bent)), rel=1e-9
+    )
+
+    # The check above goes vacuous whenever the two weights happen to be equal, which
+    # is the config's own default. So prove the ratio machinery once with weights that
+    # cannot coincide, and that no group can silently override.
+    explicit = RegularizationWeights(base_orientation=7.0, joints=1.0)
+    problem, sym = build_problem(scene, STAND, weights=explicit)
+    cost = ca.Function("f", [problem.variables], [problem.cost])
+    nominal = sym.nominal()
+    idx_q = model.joints[model.getJointId(joint_name)].idx_q
+    tilted = nominal.copy()
+    tilted[3] += 0.01
+    bent = nominal.copy()
+    bent[idx_q] += 0.01
+    assert float(cost(tilted)) == pytest.approx(7.0 * float(cost(bent)), rel=1e-9)
+
+
+def _with_groups(scene, groups):
+    """Resolve W with `joint_groups` swapped in, restoring the scene afterwards."""
+    original = scene.regularization
+    try:
+        scene.regularization = {**original, "joint_groups": groups}
+        return RegularizationWeights.from_scene(scene)
+    finally:
+        scene.regularization = original
+
+
+def test_a_joint_group_covers_the_left_right_pair_and_nothing_else(scene):
+    """One number per group is the whole point -- `knee` must not catch an ankle.
+
+    Matching is by SUBSTRING of the joint name, which is what makes a left/right pair
+    a single knob without a hand-written index list that a robot swap would silently
+    misalign.
+    """
+    weights = _with_groups(scene, {"knee": 5.0, "ankle": 0.2})
+    per_joint = weights.per_joint(scene)
+
+    assert per_joint["left_knee_joint"] == 5.0
+    assert per_joint["right_knee_joint"] == 5.0
+    assert per_joint["left_ankle_pitch_joint"] == 0.2
+    assert per_joint["right_ankle_roll_joint"] == 0.2
+    # Everything unnamed keeps the fallback.
+    assert per_joint["left_hip_pitch_joint"] == weights.joints
+    assert per_joint["waist_yaw_joint"] == weights.joints
+
+
+def test_the_more_specific_group_wins(scene):
+    """`hip: 1` plus `hip_pitch: 9` must give the pitch joints 9 and the rest 1.
+
+    Anything else makes refining a group require rewriting it, and the result would
+    depend on which key happened to be iterated first.
+    """
+    per_joint = _with_groups(scene, {"hip": 1.0, "hip_pitch": 9.0}).per_joint(scene)
+    assert per_joint["left_hip_pitch_joint"] == 9.0
+    assert per_joint["right_hip_pitch_joint"] == 9.0
+    assert per_joint["left_hip_roll_joint"] == 1.0
+    assert per_joint["left_hip_yaw_joint"] == 1.0
+
+
+def test_a_full_joint_name_is_a_group_of_one(scene):
+    """Granularity has to reach a single joint, or the feature stops short."""
+    per_joint = _with_groups(scene, {"left_knee_joint": 3.0}).per_joint(scene)
+    assert per_joint["left_knee_joint"] == 3.0
+    assert per_joint["right_knee_joint"] != 3.0
+
+
+def test_a_group_matching_no_joint_is_rejected(scene):
+    """A typo here is silent in the worst way: the joints keep the fallback and the
+    config reads as though it took effect."""
+    with pytest.raises(KeyError, match="match no joint"):
+        _with_groups(scene, {"kneee": 2.0})
+
+
+def test_two_equally_specific_groups_are_an_error_not_a_coin_flip(scene):
+    """`left_knee` and `knee_join` are both 9 characters and both match one joint.
+
+    There is no defensible winner, and picking one would make the weights depend on
+    dict insertion order -- a config that behaves differently after an innocuous
+    reordering is worse than one that refuses to load.
+    """
+    weights = _with_groups(scene, {"left_knee": 1.0, "knee_join": 2.0})
+    with pytest.raises(ValueError, match="equal specificity"):
+        weights.per_joint(scene)
+
+
+def test_group_weights_land_on_the_right_entries_of_the_diagonal(scene):
+    """The group resolves per NAME; the diagonal is indexed by `idx_q`.
+
+    Those are two different orderings, and the bug this guards against -- placing
+    weights by counting from index 7 instead of asking each joint where it lives --
+    would shift every later joint's weight by one slot the moment a joint was not
+    1-DoF, with nothing to report it.
+    """
+    model = scene.robot.model
+    weights = _with_groups(scene, {"knee": 7.0})
+    diagonal = weights.diagonal(scene)
+
+    for name in ("left_knee_joint", "right_knee_joint"):
+        idx = model.joints[model.getJointId(name)].idx_q
+        assert diagonal[idx] == 7.0, f"{name} weight landed somewhere else"
+    assert list(diagonal[7:scene.robot.nq]).count(7.0) == 2, "exactly two knees"
 
 
 def test_an_unknown_regularization_key_is_rejected(scene):

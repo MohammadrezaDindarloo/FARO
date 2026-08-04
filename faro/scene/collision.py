@@ -89,6 +89,94 @@ class CollisionBody:
 
 
 # =============================================================================
+# Pair classes -- the vocabulary a config selects pairs with
+# =============================================================================
+# Eq. 9 says "for each collision pair A and B" and defines no set, so which pairs
+# exist is ours to decide (docs/ambiguities.md #19). Rather than expose that as a
+# fixed policy, every body gets a GROUP name and every pair a CLASS built from the
+# two groups. A config can then say "robot-box" or "box" and mean something exact.
+#
+# The groups on `box_placement` are: robot, box, floor, tabletop -- giving classes
+# robot-robot (579 pairs), box-robot (36), floor-robot (36), robot-tabletop (36),
+# box-floor (1), box-tabletop (1).
+def body_group(body: CollisionBody) -> str:
+    """The name a config uses for this body: `robot`, or the object/patch's own name.
+
+    Objects and environment surfaces get their OWN name rather than a shared
+    `object`/`environment` label, because the whole point is to be able to say
+    "always watch the box" without also meaning some other object.
+    """
+    if body.kind == "robot":
+        return "robot"
+    if body.kind == "object":
+        return body.owner
+    return body.name.split("/", 1)[-1]
+
+
+def pair_class(a: CollisionBody, b: CollisionBody) -> str:
+    """Canonical class name for a pair, e.g. `box-robot`.
+
+    Alphabetically ordered so `robot-box` and `box-robot` are the same class and a
+    config cannot half-select one by writing it the other way round.
+    """
+    return "-".join(sorted((body_group(a), body_group(b))))
+
+
+def select_pairs(bodies, pairs, selectors) -> set[tuple[int, int]]:
+    """Resolve config selectors to a set of pair indices.
+
+    A selector is one of:
+
+      * a GROUP    -- `box` means every pair with the box on either side;
+      * a CLASS    -- `robot-box` (either order) means exactly that class;
+      * `all`      -- every pair.
+
+    `None` or an empty list selects NOTHING. That asymmetry with `all` is deliberate:
+    the two callers want opposite defaults (`include_pairs` defaults to everything,
+    `always_active` to nothing), and a single value meaning both would make one of
+    them a silent surprise.
+
+    An unrecognized selector RAISES, listing what is available. A typo that quietly
+    selected nothing would look exactly like a working config while disabling the
+    protection it was written to add.
+    """
+    if selectors is None:
+        return set()
+    if isinstance(selectors, str):
+        selectors = [selectors]
+
+    groups = {body_group(b) for b in bodies}
+    hyphenated = sorted(g for g in groups if "-" in g)
+    if hyphenated:
+        raise ValueError(
+            f"collision group names must not contain '-', got {hyphenated}. The "
+            f"character separates the two halves of a pair class, so a name using it "
+            f"makes `a-b` ambiguous. Rename the object or environment patch."
+        )
+    classes = {pair_class(bodies[i], bodies[j]) for i, j in pairs}
+
+    chosen: set[tuple[int, int]] = set()
+    for raw in selectors:
+        key = str(raw).strip()
+        if key == "all":
+            return set(pairs)
+        if key in groups:
+            chosen |= {(i, j) for i, j in pairs
+                       if key in (body_group(bodies[i]), body_group(bodies[j]))}
+            continue
+        canonical = "-".join(sorted(key.split("-")))
+        if canonical in classes:
+            chosen |= {(i, j) for i, j in pairs
+                       if pair_class(bodies[i], bodies[j]) == canonical}
+            continue
+        raise ValueError(
+            f"unknown collision selector {key!r}. Use a group "
+            f"{sorted(groups)}, a pair class {sorted(classes)}, or 'all'."
+        )
+    return chosen
+
+
+# =============================================================================
 # Building the bodies
 # =============================================================================
 def _convexified(geometry):
@@ -191,7 +279,7 @@ class SceneCollisionModel:
         """
         model = getattr(scene, "_collision_model", None)
         if model is None:
-            model = cls.build(scene)
+            model = cls.build(scene, include=scene.collision.get("include_pairs", "all"))
             object.__setattr__(scene, "_collision_model", model)
         return model
 
@@ -203,6 +291,7 @@ class SceneCollisionModel:
         exclude_same_link: bool = True,
         exclude_adjacent: bool = True,
         exclude_static: bool = True,
+        include: str | list[str] | None = "all",
     ) -> SceneCollisionModel:
         bodies = robot_bodies(scene) + object_bodies(scene) + environment_bodies(scene)
         model = scene.robot.model
@@ -224,7 +313,43 @@ class SceneCollisionModel:
                     continue
                 pairs.append((i, j))
 
+        # `include` removes whole CLASSES of pair from the problem -- a modelling
+        # decision, not a speed knob, and a different thing from `activation_distance`.
+        # Dropping `robot-robot` says "I do not care whether this robot passes through
+        # itself"; the cutoff only ever says "this pair cannot become active in one
+        # step". The audit still measures every pair that is in the set, so a class
+        # removed here is genuinely unwatched -- which is why it is spelled out in the
+        # config rather than inferred.
+        if include not in (None, "all"):
+            keep = select_pairs(bodies, pairs, include)
+            pairs = [p for p in pairs if p in keep]
+
         return cls(scene=scene, bodies=bodies, pairs=pairs)
+
+    # ------------------------------------------------------------ pair classes
+    def always_active_pairs(self) -> set[tuple[int, int]]:
+        """Pairs the scene config exempts from `activation_distance`.
+
+        WHY THIS EXISTS. The cutoff rests on an assumption -- that a pair currently
+        far apart cannot be driven into contact within one convex subproblem -- and
+        that assumption is about how far a body can TRAVEL per step. It holds well for
+        robot links, which are bounded by kinematics. It does not hold for a movable
+        object, whose pose is a free decision variable in `q`: the solver can translate
+        and rotate the box arbitrarily in a single pass.
+
+        Measured on the ten-target tour: the worst-penetration pair was one involving
+        the box or the platform in 9 of 9 feasible entries. Not once was it a
+        robot-robot self-collision.
+        """
+        return select_pairs(self.bodies, self.pairs,
+                            self.scene.collision.get("always_active"))
+
+    def class_counts(self) -> dict[str, int]:
+        """`{pair class: count}` for the pairs actually in this model."""
+        from collections import Counter
+
+        return dict(Counter(pair_class(self.bodies[i], self.bodies[j])
+                            for i, j in self.pairs))
 
     # ------------------------------------------------------------ placements
     def world_placement(self, body: CollisionBody, q: np.ndarray,
@@ -308,7 +433,8 @@ class SceneCollisionModel:
     def blocks(self, sym, q: np.ndarray, object_poses: dict[str, pin.SE3] | None = None,
                *, margin: float = 0.0, activation_distance: float | None = None,
                relaxed: set[tuple[int, int]] | None = None,
-               relaxed_margin: float = -1.0e-3) -> list[ConstraintBlock]:
+               relaxed_margin: float = -1.0e-3,
+               always_active: set[tuple[int, int]] | None = None) -> list[ConstraintBlock]:
         """Eq. 9, linearized at `(q, object_poses)`, for the pairs that can matter.
 
         `activation_distance` is Schulman et al.'s construction: a pair whose bodies
@@ -359,7 +485,10 @@ class SceneCollisionModel:
         out = []
         for i, j, witness in self.witnesses(q, object_poses):
             in_contact = bool(relaxed) and (i, j) in relaxed
-            if activation_distance is not None and witness.distance > activation_distance:
+            exempt = bool(always_active) and (i, j) in always_active
+            if (activation_distance is not None
+                    and witness.distance > activation_distance
+                    and not exempt):
                 continue
             R_A, p_A = self.symbolic_placement(self.bodies[i], sym)
             R_B, p_B = self.symbolic_placement(self.bodies[j], sym)

@@ -55,9 +55,48 @@ friction:
 regularization:
   base_position: 1.0
   base_orientation: 10.0
-  joints: 1.0
   object_position: 1.0
   object_orientation: 1.0
+
+  # Fallback for any actuated joint no group below matches.
+  joints: 1.0
+
+  # PER-GROUP JOINT WEIGHTS. The key is a SUBSTRING of the joint name, which is what
+  # lets one number cover a left/right pair: `knee` matches `left_knee_joint` and
+  # `right_knee_joint` and nothing else. The seven groups below partition all 29
+  # actuated joints of the G1 exactly:
+  #
+  #     hip       6   left/right hip pitch, roll, yaw
+  #     knee      2   left/right knee
+  #     ankle     4   left/right ankle pitch, roll
+  #     waist     3   waist yaw, roll, pitch
+  #     shoulder  6   left/right shoulder pitch, roll, yaw
+  #     elbow     2   left/right elbow
+  #     wrist     6   left/right wrist roll, pitch, yaw
+  #
+  # MOST SPECIFIC WINS, by length of the matching fragment, so you can refine without
+  # rewriting:
+  #
+  #     hip: 1.0            ->  all six hip joints
+  #     hip_pitch: 5.0      ->  overrides just the two hip pitch joints
+  #     left_knee_joint: 3  ->  a full name is a legal group of one
+  #
+  # A fragment matching NO joint raises rather than being ignored, and two fragments of
+  # equal length matching the same joint raise rather than one winning by dict order.
+  #
+  # Only RATIOS matter -- the whole objective is (q-q_nom)^T W (q-q_nom), so scaling
+  # every weight by the same factor changes nothing. Raise a group to say "prefer not
+  # to move these"; lower it to say "move these first".
+  #
+  # `python scripts/03_mode_feasibility.py --weights` prints what your edit resolved to.
+  joint_groups:
+    hip:      1.0     # 6 joints — left/right hip pitch, roll, yaw
+    knee:     1.0     # 2
+    ankle:    1.0     # 4 — left/right ankle pitch, roll
+    waist:    1.0     # 3 — waist yaw, roll, pitch
+    shoulder: 1.0     # 6 — left/right shoulder pitch, roll, yaw
+    elbow:    1.0     # 2
+    wrist:    1.0     # 6 — left/right wrist roll, pitch, yaw
 
 # ================================================================================
 # Collision -- paper Eq. 9. See docs/ambiguities.md #19 for the pair-set policy.
@@ -80,15 +119,59 @@ collision:
   # in the spirit of the method, and nothing here is guessing which pairs matter.
   #
   # The knob is real and measured. At 0.10 m only 53 of the 689 pairs are active at the
-  # nominal pose and 52-64 at solved configurations -- a ~12x cut in rows, 6-20x faster,
-  # and identical verdicts on every entry we compared. Set it to 0.10 to get that.
+  # nominal pose and 52-80 at solved configurations -- a ~12x cut in rows and 6-20x
+  # faster, with identical VERDICTS on every entry compared.
+  #
+  # Verdicts, not poses. Those are different and the difference matters, because Alg. 1
+  # warm-starts the KSO from these configurations. Measured on `grasp` at
+  # base_orientation 10: the cutoff returns 46.8 deg of lean with the knees bent 105
+  # deg, while ALL 689 pairs returns 78.9 deg of lean with both knees pinned at their
+  # -5 deg hyperextension limit. More rows is not a better answer -- Eq. 14 is
+  # nonconvex, and the full row set lands Ipopt in a worse local minimum here.
   #
   # ONE CAVEAT ON THE BUDGET ARGUMENT, recorded so the trade-off is not lost: Table II's
   # own counts bound the filter much harder than two hours does. On the hard task the
   # M,E,KSO run spends ~850 s on 1415 KSO attempts and ~5150 s on 79.6 TO attempts, so
   # ~1200 s is left for at least 2830 mode and edge checks -- under ~0.4 s each. Whatever
   # the paper is doing here, it is not spending tens of seconds per mode.
-  activation_distance: null
+  activation_distance: 0.1
+
+  # ---- which pairs exist, and which of them ignore the cutoff ------------------
+  # Three knobs, and they do genuinely different things:
+  #
+  #   include_pairs        which pair classes exist AT ALL      modelling decision
+  #   always_active        which classes ignore the cutoff      safety decision
+  #   activation_distance  how far apart still gets a row       speed knob
+  #
+  # A class removed from `include_pairs` is genuinely unwatched: `max_penetration`
+  # audits the pairs IN THE MODEL, so it cannot report on a class never built.
+  #
+  # Selector vocabulary (faro/scene/collision.py::select_pairs):
+  #   a GROUP  -- `robot`, `box`, `floor`, `tabletop`  -> every pair touching it
+  #   a CLASS  -- `robot-box`, either order            -> exactly that class
+  #   `all`
+  # An unknown selector RAISES rather than selecting nothing -- a typo that silently
+  # matched no pairs would look exactly like a config that worked.
+  #
+  # Classes on this scene: robot-robot 579, box-robot 36, floor-robot 36,
+  # robot-tabletop 36, box-floor 1, box-tabletop 1  =  689.
+  include_pairs: all
+
+  # WHY ANYTHING WOULD BE EXEMPT. `activation_distance` rests on the claim that a pair
+  # currently far apart cannot be driven into contact within one convex subproblem --
+  # a statement about how far a body can TRAVEL per step. That holds for robot links,
+  # which are bounded by kinematics. It does NOT hold for the box: its pose is a free
+  # decision variable in q, so the solver can translate and rotate it arbitrarily in a
+  # single pass.
+  #
+  # The measurement agrees: on the ten-target tour the worst-penetration pair involved
+  # the box or the platform in 9 of 9 feasible entries, and was never a robot-robot
+  # self-collision.
+  #
+  # `[box, tabletop]` takes the tour from ~53-80 rows to ~111-133; all pairs is 689.
+  # Compare policies with:
+  #     python scripts/03_mode_feasibility.py --scenarios
+  always_active: []
 
   # Schulman's approximation freezes the GJK witness points, so it is only valid near
   # the point they were taken at. Eq. 14 is therefore solved as a short sequence:

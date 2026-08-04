@@ -19,7 +19,9 @@ import pytest
 from faro.mode_edge.feasibility import check
 from faro.mode_edge.problem import build_problem
 from faro.scenarios.mode_demos import STAND
-from faro.scene.collision import SceneCollisionModel, environment_bodies, robot_bodies
+from faro.scene.collision import (
+    SceneCollisionModel, environment_bodies, robot_bodies, select_pairs,
+)
 from faro.scene.scene import Scene
 from faro.scene.symbolic import SymbolicScene
 
@@ -256,6 +258,27 @@ def test_a_solve_reports_how_many_refreshes_it_used(scene):
     assert 1 <= report.refreshes <= int(scene.collision["refresh_iterations"])
 
 
+def test_the_reported_time_covers_the_whole_check_not_just_the_last_solve(scene):
+    """`report.wall_time` must bound `report.result.wall_time`, not equal it.
+
+    They are two different numbers and the gap is the entire refresh sequence. The
+    demo printed only the inner one, so `grasp` announced 302 ms while the viewer
+    waited 33 s -- because the final pass starts from the previous pass's answer and
+    only confirms it, making it systematically the CHEAPEST solve in the sequence.
+    Quoting it as the cost of the filter understates it by ~100x, which matters: the
+    ~0.4 s per check that Table II implies is a comparison against the outer number.
+    """
+    assert report_time_is_sane(check(scene, STAND))
+
+
+def report_time_is_sane(report) -> bool:
+    assert report.wall_time > report.result.wall_time, (
+        f"total {report.wall_time:.3f} s does not exceed the final solve "
+        f"{report.result.wall_time:.3f} s -- the refresh passes are not being counted"
+    )
+    return True
+
+
 # =============================================================================
 # The answer is collision-free, measured independently
 # =============================================================================
@@ -426,3 +449,86 @@ def test_friction_does_not_enter_eq_14(scene):
     problem, _ = build_problem(scene, STAND, collision_blocks=blocks, sym=sym)
     labels = " ".join(problem.block.eq_labels + problem.block.ineq_labels)
     assert "7c:" not in labels and "7d:" not in labels
+
+
+# =============================================================================
+# Pair classes: `include_pairs` and `always_active`
+# =============================================================================
+def test_a_pair_class_reads_the_same_written_either_way(scene, model):
+    """`robot-box` and `box-robot` must be one class, not two.
+
+    They are stored alphabetically, so a config writing the "wrong" order would
+    otherwise select nothing -- and selecting nothing is exactly what a safety option
+    must never do quietly.
+    """
+    a = select_pairs(model.bodies, model.pairs, ["robot-box"])
+    b = select_pairs(model.bodies, model.pairs, ["box-robot"])
+    assert a == b and len(a) == 36
+
+
+def test_a_group_selects_every_pair_that_touches_it(scene, model):
+    """`box` means the box against anything, not one particular class."""
+    by_group = select_pairs(model.bodies, model.pairs, ["box"])
+    by_class = select_pairs(model.bodies, model.pairs,
+                            ["box-robot", "box-floor", "box-tabletop"])
+    assert by_group == by_class
+    assert len(by_group) == 38  # 36 robot links + floor + tabletop
+
+
+def test_an_unknown_selector_raises_instead_of_selecting_nothing(scene, model):
+    """A typo must not look like a working config.
+
+    `always_active: [platfrom]` that silently matched no pairs would disable the very
+    protection it was added to provide, and nothing downstream would report it.
+    """
+    with pytest.raises(ValueError, match="unknown collision selector"):
+        select_pairs(model.bodies, model.pairs, ["platform"])
+
+
+def test_none_selects_nothing_but_all_selects_everything(scene, model):
+    """The two callers want opposite defaults; the values must not be confusable."""
+    assert select_pairs(model.bodies, model.pairs, None) == set()
+    assert select_pairs(model.bodies, model.pairs, []) == set()
+    assert select_pairs(model.bodies, model.pairs, "all") == set(model.pairs)
+
+
+def test_include_pairs_removes_whole_classes_from_the_model(scene):
+    """Dropping `robot-robot` must leave exactly the task pairs, and be auditable."""
+    reduced = SceneCollisionModel.build(scene, include=["robot-box", "robot-tabletop"])
+    assert reduced.class_counts() == {"box-robot": 36, "robot-tabletop": 36}
+    assert len(reduced.pairs) == 72
+
+
+def test_always_active_pairs_keep_their_row_beyond_the_cutoff(scene, model):
+    """The whole point: a far-away exempt pair still gets a row.
+
+    Checked by row COUNT at a configuration where most pairs are far apart, because
+    the alternative -- trusting that the flag is read -- is what let the cutoff quietly
+    stop protecting the box.
+    """
+    q = scene.nominal_configuration()
+    sym = SymbolicScene(scene)
+    always = select_pairs(model.bodies, model.pairs, ["box", "tabletop"])
+
+    without = model.blocks(sym, q, activation_distance=0.10)
+    with_always = model.blocks(sym, q, activation_distance=0.10, always_active=always)
+
+    assert len(with_always) > len(without)
+    # Every exempt pair is present regardless of distance, so the union is exact.
+    near = {(i, j) for i, j, w in model.witnesses(q) if w.distance <= 0.10}
+    assert len(with_always) == len(near | always)
+
+
+def test_exempting_every_pair_is_the_same_as_no_cutoff(scene, model):
+    """A consistency property that pins the semantics of the two knobs together.
+
+    If `always_active` covers the whole pair set, the cutoff can have no effect at
+    all. This held in the scenario sweep -- `no_self_collision` and `task_only_full`
+    returned identical numbers on all ten targets -- and it is worth a test because
+    it is the cheapest way to catch the flag being applied in the wrong direction.
+    """
+    q = scene.nominal_configuration()
+    sym = SymbolicScene(scene)
+    everything = set(model.pairs)
+    assert (len(model.blocks(sym, q, activation_distance=0.10, always_active=everything))
+            == len(model.blocks(sym, q, activation_distance=None)))

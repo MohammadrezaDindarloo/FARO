@@ -31,6 +31,7 @@ that the tree search does not own a correctness-critical piece of Eq. 14.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -64,6 +65,14 @@ class FeasibilityReport:
     #: How many solve/refresh passes Eq. 9's frozen witness data needed. 1 means the
     #: answer never moved far enough to be worth re-linearizing.
     refreshes: int = 1
+    #: Wall time for the WHOLE check -- every restart, every refresh pass, the GJK
+    #: queries and the audit. Reported separately from `result.wall_time`, which times
+    #: only the final Ipopt call, because the two differ by two orders of magnitude and
+    #: the final call is systematically the cheapest: it starts from the previous
+    #: pass's answer and only has to confirm it. On `grasp` that is 0.23 s against
+    #: 33 s, and quoting the small number makes the filter look ~100x cheaper than it
+    #: is -- which is exactly the number Table II has to be compared against.
+    wall_time: float = 0.0
     #: Deepest interpenetration in the returned configuration, audited against ALL
     #: collision pairs -- not just the ones inside `activation_distance` that got
     #: rows. 0.0 means clear; NaN means NOT MEASURED, because the solve returned a
@@ -97,8 +106,9 @@ class FeasibilityReport:
         head = f"{self.kind} {self.target.label()}"
         if self.feasible:
             return (
-                f"{head}\n  FEASIBLE  ({self.result.iterations} iterations, "
-                f"{self.result.wall_time * 1e3:.0f} ms)"
+                f"{head}\n  FEASIBLE  ({self.wall_time:.2f} s over {self.refreshes} "
+                f"refresh pass(es); the final one took {self.result.iterations} "
+                f"iterations, {self.result.wall_time * 1e3:.0f} ms)"
             )
         if self.result.status == "Maximum_Iterations_Exceeded":
             why = (
@@ -143,6 +153,7 @@ class FeasibilityCache:
         return FeasibilityReport(
             target=report.target, feasible=report.feasible, result=report.result,
             configurations=report.configurations, cached=True, refreshes=report.refreshes,
+            wall_time=report.wall_time,
             max_penetration=report.max_penetration, penetrating_pair=report.penetrating_pair,
         )
 
@@ -199,7 +210,8 @@ def _perturb(scene: Scene, q: np.ndarray, rng, *, joint_scale: float = 0.6) -> n
 
 
 def _solve_with_refresh(scene, target, point, weights, model, margin, activation,
-                        excluded, relaxed_margin, max_refresh, tolerance, solver_config):
+                        excluded, relaxed_margin, max_refresh, tolerance, solver_config,
+                        always_active=None):
     """One initial guess, run through the Eq. 9 witness-refresh sequence.
 
     STOPPING CRITERION. Two conditions, and the second is the one that matters:
@@ -235,7 +247,8 @@ def _solve_with_refresh(scene, target, point, weights, model, margin, activation
             poses = _object_poses(scene, state)
             blocks = model.blocks(sym, state["robot"], poses, margin=margin,
                                   activation_distance=activation, relaxed=excluded,
-                                  relaxed_margin=relaxed_margin)
+                                  relaxed_margin=relaxed_margin,
+                                  always_active=always_active)
 
         problem, _ = build_problem(
             scene, target, weights=weights, q0=guess, collision_blocks=blocks, sym=sym
@@ -338,6 +351,10 @@ def check(
         if hit is not None:
             return hit
 
+    # Timed from here rather than from the function entry: a cache hit returns the
+    # cost of the solve it replaces, which is the number Table II's totals are built
+    # from, not the microsecond the dict lookup took.
+    started = time.perf_counter()
     model = collision if isinstance(collision, SceneCollisionModel) else (
         SceneCollisionModel.cached(scene) if collision else None
     )
@@ -355,6 +372,9 @@ def check(
         else None
     )
     relaxed_margin = float(settings.get("contact_pair_margin", -1.0e-3))
+    # Pair classes exempt from the cutoff -- see `always_active_pairs` for why the
+    # cutoff's assumption does not hold for a movable object.
+    always_active = model.always_active_pairs() if model is not None else None
     max_refresh = int(settings.get("refresh_iterations", 3)) if model is not None else 1
     tolerance = float(settings.get("refresh_tolerance", 1e-4))
 
@@ -366,7 +386,7 @@ def check(
         point = start if attempt == 0 else _perturb(scene, start, rng)
         result, sym, refreshes = _solve_with_refresh(
             scene, target, point, weights, model, margin, activation, excluded,
-            relaxed_margin, max_refresh, tolerance, solver_config,
+            relaxed_margin, max_refresh, tolerance, solver_config, always_active,
         )
         best = (result, sym, refreshes, attempt)
         if result.converged:
@@ -399,6 +419,7 @@ def check(
         result=result,
         configurations=configurations,
         refreshes=refreshes,
+        wall_time=time.perf_counter() - started,
         max_penetration=penetration,
         penetrating_pair=pair,
     )

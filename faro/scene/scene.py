@@ -40,12 +40,15 @@ class Scene:
     #: Eq. 14's W, by group. See `RegularizationWeights` and the config file.
     regularization: dict = field(default_factory=lambda: {
         "base_position": 1.0, "base_orientation": 10.0, "joints": 1.0,
-        "object_position": 1.0, "object_orientation": 1.0,
+        "object_position": 1.0, "object_orientation": 1.0, "joint_groups": {},
     })
     #: Eq. 9 settings: `margin`, `refresh_iterations`, `refresh_tolerance`.
     collision: dict = field(default_factory=lambda: {
         "margin": 0.0, "activation_distance": None, "relax_contact_pairs": True, "contact_pair_margin": -1.0e-3,
         "refresh_iterations": 20, "refresh_tolerance": 1.0e-4,
+        # Which pair CLASSES exist at all, and which of them ignore the cutoff.
+        # See `faro/scene/collision.py::select_pairs` for the selector vocabulary.
+        "include_pairs": "all", "always_active": [],
     })
 
     # ------------------------------------------------------------------ loading

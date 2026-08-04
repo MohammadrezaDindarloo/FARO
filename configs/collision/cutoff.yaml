@@ -1,0 +1,6 @@
+# Schulman's cutoff alone: a pair further apart than this cannot be driven into
+# contact within one convex subproblem, so it gets no row. ~53-80 rows.
+name: cutoff
+include_pairs: all
+always_active: []
+activation_distance: 0.10

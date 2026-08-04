@@ -37,7 +37,7 @@ geometry; the second is a statement about our initial guess.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 import casadi as ca
 import numpy as np
@@ -93,6 +93,48 @@ class RegularizationWeights:
     joints: float = 1.0
     object_position: float = 1.0
     object_orientation: float = 1.0
+    #: Per-group joint weights, `{name_fragment: weight}`. The KEY IS A SUBSTRING of
+    #: the joint name, which is what lets one number cover a left/right pair --
+    #: `knee` matches `left_knee_joint` and `right_knee_joint` and nothing else. See
+    #: `weight_for_joint` for how overlaps resolve. Anything unmatched falls back to
+    #: `joints`.
+    joint_groups: dict = field(default_factory=dict)
+
+    def weight_for_joint(self, name: str) -> float:
+        """The weight for one named joint, resolving `joint_groups` by name.
+
+        MOST SPECIFIC WINS, measured by the length of the matching fragment. So
+
+            hip: 1.0
+            hip_pitch: 5.0
+
+        gives the four hip roll/yaw joints 1.0 and the two hip pitch joints 5.0, which
+        is the reading anyone would expect from writing those two lines. It also means
+        a full joint name is a legal group of one -- `left_knee_joint: 3.0` weights
+        exactly that joint -- so the granularity goes from "all 29" down to a single
+        joint without a second mechanism.
+
+        A TIE IS AN ERROR, not a coin flip. Two fragments of equal length both matching
+        one joint have no defensible winner, and picking one silently would make the
+        weights depend on dict ordering.
+        """
+        matches = [(frag, w) for frag, w in self.joint_groups.items() if frag in name]
+        if not matches:
+            return self.joints
+
+        longest = max(len(frag) for frag, _ in matches)
+        best = [(frag, w) for frag, w in matches if len(frag) == longest]
+        if len(best) > 1:
+            raise ValueError(
+                f"joint {name!r} matches several regularization groups of equal "
+                f"specificity: {sorted(frag for frag, _ in best)}. Rename one, or make "
+                f"one of them more specific -- FARO will not pick for you."
+            )
+        return float(best[0][1])
+
+    def per_joint(self, scene: Scene) -> dict[str, float]:
+        """`{joint_name: weight}` for every actuated joint. For checking an edit."""
+        return {n: self.weight_for_joint(n) for n in scene.robot.actuated_joint_names}
 
     @classmethod
     def from_scene(cls, scene: Scene) -> RegularizationWeights:
@@ -101,23 +143,46 @@ class RegularizationWeights:
         A config read rather than a constructor default, so a sweep over W is a YAML
         edit and two scenes can disagree about it.
         """
+        raw = dict(scene.regularization or {})
+        groups = dict(raw.pop("joint_groups", None) or {})
+
         known = {f.name for f in fields(cls)}
-        cfg = {k: float(v) for k, v in (scene.regularization or {}).items() if k in known}
-        unknown = set(scene.regularization or {}) - known
+        unknown = set(raw) - known
         if unknown:
             raise KeyError(
                 f"unknown regularization weights {sorted(unknown)}; "
-                f"expected some of {sorted(known)}"
+                f"expected some of {sorted(known - {'joint_groups'})} plus joint_groups"
             )
-        return cls(**cfg)
+
+        # A group fragment that matches NOTHING is a typo, and a silent one: the joints
+        # it was meant for quietly keep the `joints` fallback and the config reads as
+        # though it took effect. Same reason the unknown-key check above exists.
+        names = scene.robot.actuated_joint_names
+        empty = [frag for frag in groups if not any(frag in n for n in names)]
+        if empty:
+            raise KeyError(
+                f"regularization joint_groups {sorted(empty)} match no joint on "
+                f"{scene.robot.name!r}. Available joints: {names}"
+            )
+
+        return cls(joint_groups={k: float(v) for k, v in groups.items()},
+                   **{k: float(v) for k, v in raw.items()})
 
     def diagonal(self, scene: Scene) -> np.ndarray:
         """Expand to a full diagonal over the stacked q, in `SymbolicScene` order."""
-        robot = np.concatenate([
-            np.full(3, self.base_position),
-            np.full(4, self.base_orientation),
-            np.full(scene.robot.nq - 7, self.joints),
-        ])
+        model = scene.robot.model
+        robot = np.empty(scene.robot.nq)
+        robot[:3] = self.base_position
+        robot[3:7] = self.base_orientation
+
+        # Placed by each joint's OWN idx_q rather than by counting from 7. The two
+        # agree for a chain of 1-DoF joints, and stop agreeing the moment one is not --
+        # at which point counting would shift every later joint's weight by one slot
+        # and nothing would report it.
+        for name in scene.robot.actuated_joint_names:
+            joint = model.joints[model.getJointId(name)]
+            robot[joint.idx_q:joint.idx_q + joint.nq] = self.weight_for_joint(name)
+
         per_object = np.concatenate([
             np.full(3, self.object_position),
             np.full(4, self.object_orientation),
