@@ -530,3 +530,77 @@ class SceneCollisionModel:
         if len(found) > limit:
             lines.append(f"    ... and {len(found) - limit} more")
         return "\n".join(lines)
+
+    # ------------------------------------------- Eq. 9 with parameterized witnesses
+    def fixed_pairs(self, q: np.ndarray, object_poses=None, *,
+                    activation_distance: float | None = None,
+                    always_active: set[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
+        """The pair list a parametric problem is built against, chosen ONCE.
+
+        A parametric Eq. 9 needs a FIXED pair set: the parameter vector is
+        `9 * len(pairs)` numbers, and a set that changed between refreshes would change
+        the size of the solver's parameter block -- which for a code-generating solver
+        means regenerating the very C we parameterized in order to reuse.
+
+        So the cutoff is applied once, at the point given, and the resulting list is
+        frozen for the life of the solver. That is a real difference from the Ipopt
+        path, where the active set is re-selected every pass: a pair that starts beyond
+        `activation_distance` and closes later gets no row here. `always_active`
+        exists to hold exactly the pairs where that matters -- anything touching a
+        movable object, whose pose is a free variable and can therefore move
+        arbitrarily far in one solve.
+
+        Passing `activation_distance=None` freezes the complete set, which is the
+        conservative choice and what the paper's own `0 <= sd` implies.
+        """
+        if activation_distance is None:
+            return list(self.pairs)
+        keep = set(always_active or ())
+        for i, j, witness in self.witnesses(q, object_poses):
+            if witness.distance <= activation_distance:
+                keep.add((i, j))
+        return [p for p in self.pairs if p in keep]
+
+    def parametric_blocks(self, sym, pairs, params, *, margin: float = 0.0,
+                          relaxed: set[tuple[int, int]] | None = None,
+                          relaxed_margin: float = -1.0e-3) -> list[ConstraintBlock]:
+        """Eq. 9 over `pairs`, reading the witness data from `params`.
+
+        The expression depends on `pairs` only through the body placements, so it is
+        built once per knot and re-linearized by writing new values into `params`.
+        `witness_values` produces those values in the matching order.
+        """
+        from faro.constraints.collision import collision_avoidance_parametric
+
+        out = []
+        for index, (i, j) in enumerate(pairs):
+            R_A, p_A = self.symbolic_placement(self.bodies[i], sym)
+            R_B, p_B = self.symbolic_placement(self.bodies[j], sym)
+            in_contact = bool(relaxed) and (i, j) in relaxed
+            out.append(collision_avoidance_parametric(
+                R_A, p_A, R_B, p_B, params, index,
+                margin=relaxed_margin if in_contact else margin,
+                name=f"collision[{self.bodies[i].name}|{self.bodies[j].name}]",
+            ))
+        return out
+
+    def witness_values(self, pairs, q: np.ndarray, object_poses=None) -> np.ndarray:
+        """Numeric witness data for `pairs`, in the order `parametric_blocks` expects.
+
+        Queried per pair rather than by filtering `witnesses()`, so the ORDER is the
+        pair list's and cannot drift from the expression's indexing.
+        """
+        from faro.constraints.collision import query_witness, witness_parameter_values
+
+        coal = _coal()
+        placements = {}
+        for i, j in pairs:
+            for k in (i, j):
+                if k not in placements:
+                    pose = self.world_placement(self.bodies[k], q, object_poses)
+                    placements[k] = coal.Transform3s(pose.rotation, pose.translation)
+        return witness_parameter_values([
+            query_witness(self.bodies[i].geometry, placements[i],
+                          self.bodies[j].geometry, placements[j])
+            for i, j in pairs
+        ])

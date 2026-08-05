@@ -41,6 +41,8 @@ from dataclasses import dataclass
 import casadi as ca
 import numpy as np
 
+from faro.constraints.block import ConstraintBlock
+
 
 @dataclass(frozen=True)
 class WitnessData:
@@ -187,3 +189,66 @@ def query_witness(geom_A, tf_A, geom_B, tf_B) -> WitnessData:
         normal = -normal
 
     return WitnessData(p_A=local_A, p_B=local_B, normal=normal, distance=float(distance))
+
+
+# =============================================================================
+# Eq. 9 with the witness data as SOLVER PARAMETERS
+# =============================================================================
+def witness_parameter_symbols(n_pairs: int):
+    """SX symbols for `n_pairs` frozen GJK queries: `p_A`, `p_B`, `n` each.
+
+    9 numbers per pair, laid out `[p_A(3), p_B(3), n(3)]` and concatenated in pair
+    order. `witness_parameter_values` produces the matching numeric vector, and the
+    two MUST stay in step -- a layout mismatch would silently linearize Eq. 9 about
+    the wrong geometry rather than raise.
+    """
+    return ca.SX.sym("witness", 9 * n_pairs)
+
+
+def witness_parameter_values(witnesses) -> np.ndarray:
+    """Numeric counterpart of `witness_parameter_symbols`, in the same order."""
+    out = []
+    for w in witnesses:
+        out.append(np.concatenate([
+            np.asarray(w.p_A, dtype=float).ravel(),
+            np.asarray(w.p_B, dtype=float).ravel(),
+            np.asarray(w.normal, dtype=float).ravel(),
+        ]))
+    return np.concatenate(out) if out else np.zeros(0)
+
+
+def signed_distance_expr_parametric(R_A, p_A_origin, R_B, p_B_origin, params, index):
+    """Eq. 9's right-hand side with the witness data read from `params`.
+
+    WHY THIS EXISTS -- IT IS THE WHOLE COST DIFFERENCE AGAINST THE PAPER
+    -------------------------------------------------------------------
+    `signed_distance_expr` bakes the GJK output in as `ca.DM` constants, so a new
+    linearization means a new expression, a new symbolic graph, and -- for a
+    code-generating solver like acados -- a new C compilation. That is why the Ipopt
+    path wraps the solve in an outer refresh loop of up to 20 complete NLP solves,
+    and why the first acados attempt invoked `gcc` once per refresh pass.
+
+    The witness points and normal are constants OF THE LINEARIZATION, not of the
+    problem. Expressed as parameters, the constraint is generated once and
+    re-linearizing costs a memcpy. That is what lets Schulman's sequential convex
+    procedure live where it belongs -- inside the SQP iterations, which is what the
+    paper's acados formulation does and what our outer loop was standing in for.
+    """
+    base = 9 * index
+    pa = params[base:base + 3]
+    pb = params[base + 3:base + 6]
+    normal = params[base + 6:base + 9]
+    world_A = R_A @ pa + p_A_origin
+    world_B = R_B @ pb + p_B_origin
+    return ca.dot(normal, world_A - world_B)
+
+
+def collision_avoidance_parametric(R_A, p_A_origin, R_B, p_B_origin, params, index,
+                                   *, margin: float = 0.0, name: str = "collision"):
+    """`margin - sd <= 0` with the witness data parameterized. See above."""
+    sd = signed_distance_expr_parametric(R_A, p_A_origin, R_B, p_B_origin, params, index)
+    return ConstraintBlock(
+        name=name,
+        ineq=ca.vertcat(margin - sd),
+        ineq_labels=["9:sd>=margin"],
+    )

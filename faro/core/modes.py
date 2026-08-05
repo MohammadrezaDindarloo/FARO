@@ -251,3 +251,75 @@ def iter_successors(scene: "Scene", mode: ContactMode) -> Iterator[ContactMode]:
             if option == current[name]:
                 continue
             yield ContactMode.from_dict({**current, name: option})
+
+
+@dataclass(frozen=True, order=True)
+class ContactSequence:
+    """A contact-mode time sequence C (Eq. 2), the input to the KSO (Eq. 15).
+
+        "For a contact-mode time sequence C = (c_0, ..., c_{K-1}), each mode at time
+         s is written as c_s = {(a, b_s) : a in I},  s = 0, ..., K - 1."   -- Eq. 2
+
+    ONE CONFIGURATION PER MODE. The KSO asks for a configuration at every step of the
+    sequence, and Eq. 16 is written in terms of an interface's partner "at step s and
+    step s+1" -- so the knots are indexed by the modes themselves and `len(sequence)`
+    is both the number of modes and the number of configurations. That sidesteps an
+    indexing question the paper leaves open (whether C runs to c_{K-1} or c_K, i.e.
+    whether there are K or K+1 configurations): however the paper counts, the code
+    builds one configuration per mode it is given. See docs/ambiguities.md #27.
+
+    Frozen and ordered for the same reason `ContactMode` is: Alg. 1 caches verdicts,
+    and a sequence has to be usable as a cache key without a serialization step.
+    """
+
+    modes: tuple[ContactMode, ...]
+
+    @classmethod
+    def of(cls, *modes: ContactMode) -> ContactSequence:
+        return cls(tuple(modes))
+
+    @classmethod
+    def from_dicts(cls, mappings) -> ContactSequence:
+        """Build from `[{interface: partner}, ...]` -- the form a demo or an LLM emits."""
+        return cls(tuple(ContactMode.from_dict(m) for m in mappings))
+
+    def __len__(self) -> int:
+        return len(self.modes)
+
+    def __iter__(self):
+        return iter(self.modes)
+
+    def __getitem__(self, index):
+        return self.modes[index]
+
+    def transitions(self) -> list[tuple[int, ContactMode, ContactMode]]:
+        """`(s, c_s, c_{s+1})` for every adjacent pair -- where Eq. 8 may apply."""
+        return [(s, self.modes[s], self.modes[s + 1]) for s in range(len(self.modes) - 1)]
+
+    def edges(self) -> list["ContactEdge"]:
+        """The `c_s u c_{s+1}` edges of Section II-D, for pre-filtering with Eq. 14.
+
+        Alg. 1 checks these BEFORE paying for a KSO: an edge that Eq. 14 rejects makes
+        the whole sequence infeasible, and it costs one small solve instead of one
+        large one.
+        """
+        return [ContactEdge(a, b) for _, a, b in self.transitions()]
+
+    def validate(self, scene: "Scene") -> None:
+        """Every mode must satisfy Eq. 1 and Table IV; the sequence must be non-empty."""
+        if not self.modes:
+            raise ValueError(
+                "a contact sequence must contain at least one mode -- Eq. 15 optimizes "
+                "one configuration per mode, so an empty sequence has no variables."
+            )
+        for s, mode in enumerate(self.modes):
+            try:
+                mode.validate(scene)
+            except ValueError as exc:
+                raise ValueError(f"mode {s} of the sequence is invalid: {exc}") from exc
+
+    def label(self) -> str:
+        return "  ->  ".join(mode.label() for mode in self.modes)
+
+    def __repr__(self) -> str:  # pragma: no cover - display only
+        return f"ContactSequence({len(self.modes)} modes: {self.label()})"

@@ -38,7 +38,7 @@ from faro.constraints.frames import log3, relative_patch_transform
 def no_slip(
     R_a_s, p_a_s, R_b_s, p_b_s,
     R_a_next, p_a_next, R_b_next, p_b_next,
-    *, name: str = "no_slip", flip_b: bool = True,
+    *, name: str = "no_slip", flip_b: bool = True, yaw: str = "column",
 ) -> ConstraintBlock:
     """Eq. 8: the relative in-plane pose of a contact is unchanged across a step.
 
@@ -48,23 +48,61 @@ def no_slip(
     the box while the box is carried satisfies Eq. 8 even though both patches sweep
     through space.
 
-    Returns 3 equalities: two in-plane position, one relative yaw.
+    Returns 3 equalities: two in-plane position, one relative yaw (plus, for the
+    default `yaw` form, one inequality selecting the correct branch).
+
+    THE YAW ROW HAS TWO FORMS, FOR THE SAME REASON EQ. 7a DOES
+    ----------------------------------------------------------
+    The paper writes `log3((R^s)^T R^{s+1})_z = 0`, and `yaw="log3"` is that verbatim.
+    It is also unusable with an exact-Hessian solver here: `cpin.log3`'s SECOND
+    derivative returns NaN for some inputs, and Ipopt reports `nlp_hess_l failed: NaN
+    detected` followed by `Invalid_Number_Detected`. First derivatives are clean --
+    which is why this went unnoticed through Milestone 2's finite-difference checks
+    and through Eq. 14, whose default 7a form avoids log3 entirely.
+
+    What is established: the KSO fails this way with `yaw="log3"` and solves with
+    `yaw="column"`; the NaN is in the Hessian, not the value or the Jacobian; and it
+    does not reproduce as a clean function of rotation angle or axis. What is NOT
+    established is the mechanism inside pinocchio -- `cpin.log3` branches on the
+    rotation angle, and second-order AD through a branch evaluates BOTH sides, where
+    a `0/0` in the inactive one propagates as `NaN * 0 = NaN`. That is a plausible
+    account, not a demonstrated one. See docs/ambiguities.md #23.
+
+    `yaw="column"` uses `(R^s)^T R^{s+1}` directly:
+
+        R_rel[1,0] = 0     (the sine of the relative yaw)
+        R_rel[0,0] >= 0    (its cosine, selecting yaw = 0 over yaw = pi)
+
+    Equivalent as a set wherever Eq. 7a holds, because 7a already forces both relative
+    rotations to be pure yaws, and a pure yaw with zero sine and non-negative cosine is
+    the identity. Exactly the same argument, and the same two-branch structure, as
+    `normal_alignment_rows`.
     """
+    if yaw not in {"column", "log3"}:
+        raise ValueError(f"yaw must be 'column' or 'log3', got {yaw!r}")
+
     R_s, p_s = relative_patch_transform(R_a_s, p_a_s, R_b_s, p_b_s, flip_b=flip_b)
     R_n, p_n = relative_patch_transform(R_a_next, p_a_next, R_b_next, p_b_next, flip_b=flip_b)
 
     # In-plane translation is unchanged (the z component is already pinned by 7a).
     d_p = p_n - p_s
 
-    # Relative yaw is unchanged. log3(R_s^T R_n) is the rotation FROM step s TO
-    # step s+1; its z component is the in-plane (about-normal) part.
-    d_omega = log3(R_s.T @ R_n)
+    # The rotation FROM step s TO step s+1.
+    R_rel = R_s.T @ R_n
 
-    eq = ca.vertcat(d_p[0], d_p[1], d_omega[2])
+    if yaw == "log3":
+        return ConstraintBlock(
+            name=name,
+            eq=ca.vertcat(d_p[0], d_p[1], log3(R_rel)[2]),
+            eq_labels=["8:dp_x", "8:dp_y", "8:dyaw"],
+        )
+
     return ConstraintBlock(
         name=name,
-        eq=eq,
+        eq=ca.vertcat(d_p[0], d_p[1], R_rel[1, 0]),
         eq_labels=["8:dp_x", "8:dp_y", "8:dyaw"],
+        ineq=ca.vertcat(-R_rel[0, 0]),
+        ineq_labels=["8:cos_dyaw>=0"],
     )
 
 

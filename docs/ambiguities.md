@@ -53,6 +53,61 @@ Format: one entry per ambiguity, added as we encounter it.
 - **Floating base:** `nq - nv == 1` is the signature of a quaternion-parameterised
   free-flyer root. Useful assertion to catch an accidental fixed-base URDF load.
 
+## Milestone 4 (KSO, Eq. 15)
+
+**#23 RECLASSIFIED -- this was never a paper ambiguity. It is an artifact of our
+solver substitution.** Measured on the `reach` sequence:
+
+| | `yaw=log3` (paper-literal) | `yaw=column` (ours) |
+|---|---|---|
+| `hessian_approximation: exact` | **Invalid_Number_Detected** | Solve_Succeeded |
+| `hessian_approximation: limited-memory` | **Solve_Succeeded** | Solve_Succeeded |
+
+The failure needs the EXACT Hessian. Section II-G solves the KSO with acados SQP,
+which uses Gauss-Newton -- constraint Jacobians only, never exact second derivatives
+of constraint expressions. So the paper can write `log3` in Eq. 7a and Eq. 8 and
+never encounter this, and our column forms are a deviation forced by choosing Ipopt,
+not a gap in the paper.
+
+Open decision: keep `column` + exact Hessian (current default), or move to
+`log3` + limited-memory, which is closer to the paper on both counts. The second has
+not been measured beyond this one sequence.
+
+**#23 background -- the mechanism.**
+Recorded in Milestone 3 as reproducible but unexplained. Milestone 4 localized it:
+`cpin.log3`'s **second** derivative returns NaN for some inputs. Value and Jacobian
+are clean, which is why Milestone 2's finite-difference checks and Eq. 14's
+`alignment="column"` default both missed it, and why it only surfaces with
+`hessian_approximation: exact`. Ipopt reports `nlp_hess_l failed: NaN detected`
+followed by `Invalid_Number_Detected`.
+
+Not established: the precise condition. It does not reproduce as a clean function of
+rotation angle or axis -- 0/1600 random rotations produced it, while several
+structured probes did. A plausible but UNDEMONSTRATED account is that `cpin.log3`
+branches on the angle and second-order AD evaluates both sides, letting a `0/0` in
+the inactive branch propagate as `NaN * 0 = NaN`.
+
+Consequence: `log3` is avoided in constraint expressions. Eq. 7a already used the
+column form; Eq. 8's yaw row now does too (`yaw="column"`), with the paper-literal
+form kept as an option.
+
+**#27 -- how many configurations a sequence has.** Eq. 2 writes
+`C = (c_0, ..., c_{K-1})` while the KSO is described over `K+1` configurations. We
+build **one configuration per mode given**, which matches Eq. 16's own indexing
+("partner at step s and step s+1") and makes the question moot in code.
+
+**#28 -- Eq. 15's cost.** Named, never written. Default is the direct generalization
+of Eq. 14: sum the same weighted nominal-distance over every step. A `smoothness`
+term penalizing `q_{s+1} - q_s` is implemented and defaults to **0.0**. Config:
+`kso:` in the scene file. See `SequenceWeights`.
+
+**#29 -- nothing pins the initial state.** Eq. 15 as printed makes every object pose a
+free variable at every step, including the first, so the box may start somewhere other
+than where it is. Measured on `stand -> grasp`: it slides from x = 0.45 to x = 0.047 in
+step 0, before the robot touches it, because that is cheaper than reaching. Inside
+Alg. 1 this cannot be the intent -- a node has a known state. `anchor_initial=True`
+adds the constraint; it is **off** by default because the paper does not write it.
+
 ## Already known, to be resolved in later milestones
 
 These are flagged now because they are visible from the paper text alone, and will

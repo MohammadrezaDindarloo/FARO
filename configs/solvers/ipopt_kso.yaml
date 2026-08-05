@@ -1,0 +1,47 @@
+# Ipopt settings for the KSO, paper Eq. 15.
+#
+# NOT the paper's solver. Section II-G:
+#
+#   "The KSO is solved with the SQP solver in acados, whereas the TO is solved with
+#    the SQP solver Hippo. The mode/edge optimizations (14) are solved with Ipopt."
+#
+# So Eq. 14 matches the paper exactly and this one does not. Interior-point vs SQP is
+# an algorithmic difference, which means Table I's KSO timings (0.14-1.93 s, avg 0.60)
+# are NOT a target we should expect to hit. Compare feasibility verdicts and
+# constraint coverage against the paper; compare wall-clock only against ourselves.
+# `faro/solvers/nlp.py` is shaped so an acados backend is a new `_solve_*` function
+# and one key here, not a change to Eq. 15.
+
+backend: ipopt
+
+ipopt:
+  # --- the false-negative knob ----------------------------------------------
+  # Same meaning as in Eq. 14 (Section II-D defines infeasibility as failure to
+  # converge within this), but a KSO is a bigger problem: len(sequence) times the
+  # variables, plus Eq. 8 coupling every adjacent pair. The same budget would
+  # therefore be a TIGHTER bound on a HARDER problem, and Section IV-C names
+  # insufficient iterations as a direct source of the paper's own false negatives.
+  #
+  # 2000 is Eq. 14's 1000 doubled. Re-measure it when the sequence length or the
+  # constraint set changes -- this is the false-negative rate, not a speed setting.
+  max_iter: 2000
+
+  # --- convergence ----------------------------------------------------------
+  # As in Eq. 14: the question is whether a sequence EXISTS, not what the last
+  # digits of the optimum are. `Solved_To_Acceptable_Level` counts as converged in
+  # faro/solvers/nlp.py, so these bounds are part of the verdict.
+  tol: 1.0e-6
+  constr_viol_tol: 1.0e-6
+  acceptable_tol: 1.0e-4
+  acceptable_iter: 10
+
+  linear_solver: mumps
+  print_level: 0
+  sb: "yes"
+
+  nlp_scaling_method: gradient-based
+  mu_strategy: adaptive
+  hessian_approximation: exact
+
+casadi:
+  print_time: false

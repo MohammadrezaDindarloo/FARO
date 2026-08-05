@@ -134,7 +134,20 @@ collision:
   # M,E,KSO run spends ~850 s on 1415 KSO attempts and ~5150 s on 79.6 TO attempts, so
   # ~1200 s is left for at least 2830 mode and edge checks -- under ~0.4 s each. Whatever
   # the paper is doing here, it is not spending tens of seconds per mode.
-  activation_distance: 0.1
+  # MEASURED, 2026-08-04, and this is why it is null. The acados KSO (Eq. 15) FAILS
+  # at 0.1 and SUCCEEDS with every pair, on the same sequence:
+  #
+  #     53 pairs   QP_Solver_Failed  stat=2.18e+00  ineq=1.0e-03  cost=14.06
+  #    689 pairs   Solve_Succeeded   stat=1.46e-07  ineq=7.5e-16  cost=11.31   119 ms
+  #
+  # `fixed_pairs` freezes the pair set ONCE, at q_init, so a cutoff selects the pairs
+  # that are close at the START. The solve then travels away from there: pairs that
+  # become relevant en route carry no row at all, while the frozen ones get driven
+  # onto their boundaries -- a linearization that contradicts the geometry it is
+  # meant to describe, which HPIPM reports as MIN_STEP. Ipopt tolerated this; an SQP
+  # does not. The cutoff is a speed knob that costs correctness here, and Eq. 9 is
+  # over all pairs anyway.
+  activation_distance: null
 
   # ---- which pairs exist, and which of them ignore the cutoff ------------------
   # Three knobs, and they do genuinely different things:
@@ -202,6 +215,24 @@ collision:
   #
   # `max_penetration` is audited over EVERY pair including these, which is how the
   # 12.8 cm was caught rather than shipped.
+  # ON, and it is LOAD-BEARING. Measured 2026-08-04, acados KSO on `reach`, all four
+  # combinations of this switch with `activation_distance`:
+  #
+  #      53 pairs, relaxed    QP_Solver_Failed             stat=2.18e+00  ineq=1.0e-03
+  #     689 pairs, relaxed    Solve_Succeeded              stat=1.46e-07  ineq=7.5e-16
+  #      53 pairs, NO relax   Maximum_Iterations_Exceeded  stat=4.77e-02  ineq=6.2e-10
+  #     689 pairs, NO relax   QP_Solver_Failed             stat=5.03e+00  ineq=9.8e-01
+  #
+  # The two knobs are NOT independent. Turning the relaxation off HELPS at 53 pairs and
+  # is catastrophic at 689, because Eq. 7 requires a patch TOUCHING (sd = 0) while Eq. 9
+  # requires sd >= margin = 0 for those same two bodies. That is a flat contradiction,
+  # and an inequality residual of 0.98 is the solver saying so. At the 0.1 cutoff most
+  # contacting pairs carried no row at all, so the contradiction was never expressed --
+  # the reduction was HIDING it, not avoiding it.
+  #
+  # KNOWN DEVIATION: the paper's Eq. 9 grants no such exemption. Something has to give
+  # where 7 and 9 meet and the paper does not say what; this is our choice, made
+  # explicit rather than silent. See docs/ambiguities.md.
   relax_contact_pairs: true
   contact_pair_margin: -1.0e-3
 

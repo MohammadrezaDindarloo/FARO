@@ -10,7 +10,7 @@ Subpackage map (which paper section each one implements):
     robots/       URDF loading + Pinocchio wrappers (numeric and symbolic)
     scene/        scene definition: objects, allowed contact interfaces
     constraints/  shared CasADi constraint blocks, Section II-C / Eqs. 7-13
-    solvers/      backend-agnostic NLP interface; Ipopt now, acados later
+    solvers/      backend-agnostic NLP interface; Ipopt
     mode_edge/    single-mode and edge feasibility IK-NLP, Eq. 14
     kso/          kinematic sequence optimization, Eq. 15
     to/           full dynamic trajectory optimization, Eq. 17
