@@ -110,6 +110,14 @@ class FeasibilityReport:
                 f"refresh pass(es); the final one took {self.result.iterations} "
                 f"iterations, {self.result.wall_time * 1e3:.0f} ms)"
             )
+        if self.result.status == "Contradictory_Contacts":
+            return (
+                f"{head}\n  INFEASIBLE  decided on geometry, with no solve at all: "
+                f"the union of the two modes asks one flat patch to lie against two "
+                f"faces of the same rigid body at once. This is the SAME verdict "
+                f"Eq. 14 returns -- it just costs microseconds instead of ~40 s.\n"
+                f"  {self.result.worst_row}"
+            )
         if self.result.status == "Maximum_Iterations_Exceeded":
             why = (
                 "hit the iteration cap without converging. This is a verdict about "
@@ -187,6 +195,86 @@ def _object_poses(scene: Scene, state: dict) -> dict:
     }
 
 
+def _is_configuration(x: np.ndarray, *, bound: float = 1e3) -> bool:
+    """Is this iterate a point worth re-linearizing at, or is it wreckage?
+
+    `np.isfinite` alone is not enough, and that is measured rather than argued. A
+    failed Eq. 14 solve returns entries around 1e308 -- finite, so the isfinite guard
+    sails past them -- and feeding those back as the next linearization point is not
+    merely a slow path, it is a broken one:
+
+      * Ipopt rejects the point WITHOUT RUNNING (`Invalid_Number_Detected`, 0
+        iterations) and returns it unchanged, so the refresh loop re-linearizes at
+        the same rejected point and spins to its cap: 19 no-op passes at ~0.5 s
+        each, measured on `edge-regrasp`, twice over.
+      * the per-pass penetration audit hands those coordinates to GJK, which raised
+        `coincident body origins` and took the whole process down. Inside Alg. 1 that
+        is not a slow candidate, it is a lost two-hour run and its entire cache.
+
+    `bound` is deliberately loose. A configuration holds metres (a few), quaternion
+    components (at most 1) and joint angles (at most pi), so 1e3 cannot reject a real
+    answer while catching the wreckage by twenty orders of magnitude.
+    """
+    x = np.asarray(x, dtype=float)
+    return bool(np.isfinite(x).all() and float(np.max(np.abs(x))) < bound)
+
+
+def _can_be_flush(patch_a, patch_b) -> bool:
+    """Could ONE patch lie flush against both of these at the same instant?
+
+    Only decidable when both are rigidly attached to the same body: then their
+    relative pose is fixed, and Eq. 7a's two requirements can be checked directly --
+    the outward normals must be parallel, and the two patch planes must coincide.
+    Patches on DIFFERENT bodies can move relative to each other, so nothing is
+    claimed about them and the solver decides as usual.
+    """
+    if (patch_a.attachment, patch_a.parent) != (patch_b.attachment, patch_b.parent):
+        return True
+    normal_a = patch_a.placement.rotation[:, 2]
+    normal_b = patch_b.placement.rotation[:, 2]
+    if float(np.dot(normal_a, normal_b)) < 1.0 - 1e-9:
+        return False
+    offset = float(np.dot(normal_a, patch_b.placement.translation - patch_a.placement.translation))
+    return abs(offset) <= 1e-9
+
+
+def contradictory_contacts(scene: Scene, target) -> str:
+    """Eq. 7a decided symbolically: is this edge impossible on geometry alone?
+
+    An edge is the union `c1 u c2` (Section II-D), so an interface that changes
+    partner appears with BOTH. Eq. 7a then asks one flat patch to lie flush against
+    two patches at once. When those two are on the same rigid body that is decidable
+    without any optimization -- and on `box_placement` three partner pairs fail it:
+
+        box_bottom  floor + tabletop      parallel normals, planes 0.40 m apart
+        left_hand   box_left + box_front  perpendicular normals
+        right_hand  box_right + box_rear  perpendicular normals
+
+    This is not a heuristic and not a relaxation: it returns the SAME verdict Eq. 14
+    returns, for the same reason, in microseconds instead of tens of seconds.
+    Measured over the full edge set, it settles 6176 of 11556 ordered edges (53.4%),
+    and on a sample of eight of those Eq. 14 agreed eight times out of eight -- at
+    35-51 s each.
+
+    Modes cannot contradict themselves this way: Eq. 1 gives every interface exactly
+    one partner, so only an edge is ever tested.
+
+    Returns a human-readable reason, or "" when nothing is decidable here. An empty
+    string is NOT a feasibility claim -- it means the solver still has to answer.
+    """
+    if not isinstance(target, ContactEdge):
+        return ""
+    for name in sorted(scene.interfaces):
+        before = target.before.partner(name)
+        after = target.after.partner(name)
+        if before is None or after is None or before == after:
+            continue
+        if not _can_be_flush(scene.patches[before], scene.patches[after]):
+            return (f"Eq. 7a: {name} would have to lie flush against {before} and "
+                    f"{after} simultaneously, and they are fixed to the same body")
+    return ""
+
+
 def _perturb(scene: Scene, q: np.ndarray, rng, *, joint_scale: float = 0.6) -> np.ndarray:
     """A restart point: same base and object poses, randomized ARM AND LEG angles.
 
@@ -214,9 +302,9 @@ def _solve_with_refresh(scene, target, point, weights, model, margin, activation
                         always_active=None):
     """One initial guess, run through the Eq. 9 witness-refresh sequence.
 
-    STOPPING CRITERION. Two conditions, and the second is the one that matters:
+    STOPPING CRITERION. Two conditions, and both were measured into place:
 
-      * the configuration stopped moving (`refresh_tolerance`), and
+      * the solve CONVERGED, and
       * the answer is actually collision-free when re-queried against ALL pairs.
 
     Stopping on movement alone is not enough, and that is measured rather than
@@ -230,6 +318,31 @@ def _solve_with_refresh(scene, target, point, weights, model, margin, activation
     sequential convex procedure does: re-linearize until the convex model and the true
     geometry agree, not a fixed number of times. `refresh_iterations` is the cap, and
     hitting it is reported through `max_penetration` rather than hidden.
+
+    WHAT THIS RULE REPLACED, AND WHY IT TOOK TWO TRIES
+    --------------------------------------------------
+    It used to be `moved < tolerance AND clean`. The movement half never fired:
+    re-linearizing at a new point perturbs the rows enough to keep `max|dq|` above
+    `refresh_tolerance` = 1e-4 indefinitely, so the iterate circles the constraint
+    boundary and the CAP, not convergence, ended every loop. Measured 2026-08-08:
+    `lift` used 20 of 20 passes and was already clean at pass 1.
+
+    Dropping it alone made the ten-target tour SLOWER -- 413 s to 548 s -- because the
+    loop could then exit on a pass whose Ipopt solve had FAILED but whose geometry was
+    clean. `check` discards a non-converged result and restarts, so an early exit
+    bought a fresh twenty passes: `grasp` 25 s -> 133 s, `edge-reach` 18 s -> 114 s.
+
+    Requiring convergence as well is what made it a win. Section II-D puts the verdict
+    in the solver status, so an iterate that did not converge is not an answer whose
+    collision audit means anything -- `check` already refuses to audit one, reporting
+    NaN. Measured over the tour, against the old rule:
+
+        old (moved AND clean)     408 s    40.8 s per check
+        this (converged AND clean) 337 s   33.7 s per check   identical verdicts
+
+    Not slower on any single entry, and 1.66x on the feasible ones. The total is held
+    up by `edge-regrasp`, an INFEASIBLE edge at 223 s -- 66% of the tour -- which no
+    early-exit rule can help, since it never converges to exit on.
     """
     guess = np.asarray(point, dtype=float)
     result = sym = None
@@ -254,25 +367,29 @@ def _solve_with_refresh(scene, target, point, weights, model, margin, activation
             scene, target, weights=weights, q0=guess, collision_blocks=blocks, sym=sym
         )
         result = solve(problem, solver_config)
-        moved = float(np.max(np.abs(result.x - guess)))
-        guess = result.x
         refreshes = iteration + 1
+
+        # A FAILED pass is not by itself a reason to stop -- `place` reports
+        # Infeasible_Problem_Detected on passes 1, 2 and 3 and converges on pass 4,
+        # so the loop must keep going as long as the iterate is still a
+        # CONFIGURATION. What it must never do is re-linearize at wreckage; see
+        # `_is_configuration` for what that costs.
+        if not _is_configuration(result.x):
+            break  # the restart loop will retry from a perturbed start
+        guess = result.x
 
         if model is None:
             break
-        if not np.isfinite(guess).all():
-            break  # nothing to re-linearize around; the restart loop will retry
         state = sym.split(guess)
         penetration, _ = model.worst_penetration(state["robot"], _object_poses(scene, state))
-        # Settled AND clean. Either alone is not enough: a converged-but-penetrating
-        # answer is precisely the failure mode a fixed pass count produces.
-        #
         # The allowance has to match what the rows were actually asked for. Contact
         # pairs carry `relaxed_margin` (1 mm of slack), so demanding `>= -tolerance`
         # here asks the answer to be cleaner than any row required and the loop can
         # never terminate -- it ran to its cap on every solve until this matched.
         allowance = min(-tolerance, relaxed_margin if excluded else 0.0) - tolerance
-        if moved < tolerance and penetration >= allowance:
+        # CONVERGED, and clean. See the docstring for why both halves are here and
+        # what each of them cost when it was not.
+        if result.converged and penetration >= allowance:
             break
 
     return result, sym, refreshes
@@ -355,6 +472,26 @@ def check(
     # cost of the solve it replaces, which is the number Table II's totals are built
     # from, not the microsecond the dict lookup took.
     started = time.perf_counter()
+
+    # Eq. 7a, decided on geometry before any solver is started. Cached like any other
+    # verdict so the tree search sees one uniform kind of answer.
+    reason = contradictory_contacts(scene, target)
+    if reason:
+        nominal = SymbolicScene(scene)
+        report = FeasibilityReport(
+            target=target, feasible=False,
+            result=SolveResult(
+                converged=False, x=nominal.nominal(), cost=0.0, iterations=0,
+                status="Contradictory_Contacts", wall_time=0.0, worst_row=reason,
+            ),
+            configurations=nominal.split(nominal.nominal()),
+            wall_time=time.perf_counter() - started,
+            max_penetration=float("nan"),
+            penetrating_pair="not audited: no solve was attempted",
+        )
+        if cache is not None and q0 is None:
+            cache.put(report)
+        return report
     model = collision if isinstance(collision, SceneCollisionModel) else (
         SceneCollisionModel.cached(scene) if collision else None
     )

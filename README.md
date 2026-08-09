@@ -86,11 +86,15 @@ as that milestone is built.
 | 0 | Environment & scaffolding | `00_check_install.py` | **done** — 17/17 checks pass |
 | 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | **done** — 48/48 tests pass, branching factor 108 reproduced |
 | 2 | Shared constraints (Eqs. 7–13) | `02_constraint_playground.py` | **done** — 441 tests; 28/28 constraints fail exactly where predicted |
-| 3 | Mode/edge feasibility (Eq. 14) | `03_mode_feasibility.py` | **in progress** — Eq. 14 complete: contact (7a/7b) + **collision (9, 689 pairs)** + limits (13a), Ipopt as the paper specifies |
-| 4 | KSO (Eq. 15) | `04_kso_demo.py` | not started |
-| 5 | TO (Eq. 17) | `05_to_demo.py` | not started |
-| 6 | Tree search (Alg. 1) | `06_tree_search_demo.py` | not started |
+| 3 | Mode/edge feasibility (Eq. 14) | `03_mode_feasibility.py` | **done** — contact (7a/7b) + collision (9) + limits (13a) on Ipopt, as Section II-G specifies. **1.9 s per check**, down from 33 s |
+| 4 | KSO (Eq. 15) | `04_kso_demo.py` | **in progress** — Eq. 15 on acados SQP with parametric witnesses; solve is 0.17 s, but code generation is ~580 s per distinct sequence |
+| 5 | Tree search (Alg. 1) | `05_tree_search.py` | **in progress** — Eqs. 18/19 and the filter pipeline run; `F = [M, E]` searches, `F2` waits on the KSO build cost |
+| 6 | TO (Eq. 17) | `06_to_demo.py` | not started |
 | 7 | LLM contact-plan sampling | `07_llm_sampling_demo.py` | not started |
+
+Milestones 5 and 6 are swapped relative to the paper's section order, because the
+tree search only needs Eq. 14 to do useful work while the TO needs a solver we do not
+have yet (Hippo is not public).
 
 ## Stack
 
@@ -176,6 +180,48 @@ agree, most to machine precision. Highlights:
 
 See [faro/scenarios/README.md](faro/scenarios/README.md) for the full table and what
 to watch in the viewer.
+
+## Milestone 3 — Eq. 14, and where the time went
+
+```bash
+python scripts/03_mode_feasibility.py            # the ten-target tour, in Meshcat
+python scripts/03_mode_feasibility.py --sweep    # all 108 modes of Table IV
+```
+
+**Look at the pose, not just the verdict.** The dangerous bugs make *more* things
+feasible, not fewer — a dropped constraint, a patch offset in the wrong frame, an
+object whose variables never reach the solver. None show up in the verdict; all of
+them show up in where the robot ended up.
+
+The tour went **333 s → 82 s → 19 s** at unchanged verdicts. What actually did it,
+in order of size (details in [faro/mode_edge/README.md](faro/mode_edge/README.md)):
+
+- **Deciding contradictory edges on geometry.** An edge asking one flat patch to lie
+  against two faces of the same rigid body is impossible by Eq. 7a, no solver needed.
+  It settles **53.4% of all 11,556 ordered edges** in microseconds instead of 35–51 s.
+- **The collision cutoff, swept.** `activation_distance: 0.10` — every value from
+  0.05 to 0.50 gives identical verdicts, and the cost is a U-curve with 0.10 at the
+  bottom (4.2×). Eq. 15 needs the opposite and has its own key.
+- **A stopping rule that terminates.** The refresh loop's old rule never fired on its
+  own; the cap ended every loop.
+- **Not re-linearizing at wreckage.** A failed solve returns *finite* nonsense
+  (~1e308) that `isfinite` waves through. It cost 19 no-op passes per restart — and
+  crashed the process when it reached GJK.
+
+## Milestone 5 — the tree search (Alg. 1)
+
+```bash
+python scripts/05_tree_search.py --dry-run       # Eqs. 18/19 only, no solving, ~5 s
+python scripts/05_tree_search.py --budget 300    # a real five-minute search
+```
+
+Watch the **rejections and the cache**, not the solution count — a search that admits
+everything is enumerating, not searching. See
+[faro/search/README.md](faro/search/README.md).
+
+`F = [M, E]` is the current default and is **not** one of the paper's variants (all
+of Eq. 21's contain KSO or TO). The KSO's ~580 s code generation per distinct
+sequence is what stands between here and `F2`.
 
 ## Open paper ambiguities
 

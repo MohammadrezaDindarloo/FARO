@@ -41,7 +41,7 @@ from faro.core.modes import ContactSequence
 from faro.kso.problem import (
     SequenceWeights, edge_at, mode_at, n_knots, symbolic_knots,
 )
-from faro.mode_edge.feasibility import _object_poses, _perturb
+from faro.mode_edge.feasibility import _object_poses, _perturb, contradictory_contacts
 from faro.scene.collision import SceneCollisionModel
 from faro.scene.scene import Scene
 from faro.solvers.nlp import SolveResult
@@ -75,6 +75,13 @@ class KSOReport:
 
     def explain(self) -> str:
         head = f"sequence of {len(self.sequence)} modes"
+        if self.result.status == "Contradictory_Contacts":
+            return (
+                f"{head}\n  INFEASIBLE  decided on geometry, with no solve and no "
+                f"code generation: one transition asks a single flat patch to lie "
+                f"against two faces of the same rigid body at once, which Eq. 7a "
+                f"cannot satisfy at any configuration.\n  {self.result.worst_row}"
+            )
         if self.feasible:
             return (
                 f"{head}\n  FEASIBLE  ({self.wall_time:.2f} s, {self.result.iterations} "
@@ -159,7 +166,9 @@ def _build_key(scene: Scene, sequence: ContactSequence, goal) -> tuple:
     settings = scene.collision
     return (
         scene.name, sequence.label(),
-        settings.get("activation_distance", None),
+        # The cutoff Eq. 15 ACTUALLY uses, not the scene-level one -- keying on the
+        # wrong value would serve a solver compiled for a different pair set.
+        SceneCollisionModel.activation_distance_for(settings, "kso"),
         bool(settings.get("relax_contact_pairs", True)),
         float(settings.get("margin", 0.0)),
         float(settings.get("contact_pair_margin", -1.0e-3)),
@@ -224,6 +233,32 @@ def check(
 
     started = time.perf_counter()
     sequence.validate(scene)
+
+    # Eq. 7a on every edge of the sequence, decided on geometry before anything is
+    # generated. Eq. 15 constrains knot s by the EDGE `c_{s-1} u c_s`, so a sequence
+    # containing a contradictory transition cannot have a solution -- and catching it
+    # here is worth far more than it is in Eq. 14: a KSO miss costs an acados code
+    # generation and compile (~580 s), not a 40 s solve.
+    for s in range(1, n_knots(sequence)):
+        reason = contradictory_contacts(scene, edge_at(sequence, s))
+        if reason:
+            knots = symbolic_knots(scene, n_knots(sequence))
+            report = KSOReport(
+                sequence=sequence, feasible=False,
+                result=SolveResult(
+                    converged=False, x=np.concatenate([k.nominal() for k in knots]),
+                    cost=0.0, iterations=0, status="Contradictory_Contacts",
+                    wall_time=0.0, worst_row=f"knot {s}: {reason}", backend="geometry",
+                ),
+                configurations=[k.split(k.nominal()) for k in knots],
+                wall_time=time.perf_counter() - started,
+                max_penetration=float("nan"),
+                penetrating_pair="not audited: no solve was attempted",
+            )
+            if cache is not None and q0 is None:
+                cache.put(report)
+            return report
+
     weights = weights if weights is not None else SequenceWeights.from_scene(scene)
     model = collision if isinstance(collision, SceneCollisionModel) else (
         SceneCollisionModel.cached(scene) if collision else None

@@ -120,7 +120,32 @@ collision:
   #
   # The knob is real and measured. At 0.10 m only 53 of the 689 pairs are active at the
   # nominal pose and 52-80 at solved configurations -- a ~12x cut in rows and 6-20x
-  # faster, with identical VERDICTS on every entry compared.
+  # faster.
+  #
+  # SWEPT ON 2026-08-08 over the ten-target tour, under the current stopping rule
+  # (converged AND clean). Every cutoff agrees with the 689-pair reference on every
+  # verdict, and the cost is a U-curve with a clear optimum:
+  #
+  #     cutoff    total    per check   vs 689   verdicts
+  #     null      333 s     33.3 s      1.0x    reference
+  #     0.05      121 s     12.1 s      2.8x    identical
+  #     0.10       79 s      7.9 s      4.2x    identical   <- optimum
+  #     0.20       96 s      9.6 s      3.5x    identical
+  #     0.30      127 s     12.7 s      2.6x    identical
+  #     0.50      431 s     43.1 s      0.8x    identical   (slower than all pairs)
+  #
+  # Both ends cost, for opposite reasons: too FEW rows and the refresh loop needs more
+  # passes to settle the active set (grasp takes 6 at 0.05 against 2 at 0.10); too MANY
+  # and each solve pays for pairs that were never near mattering. At the reference
+  # answers the closest non-contact pair is 0.6-9.5 mm, so 0.10 carries ~10x the
+  # headroom the geometry needs, while 0.30 quadruples the rows to capture pairs at a
+  # median distance of 0.43 m.
+  #
+  # AN EARLIER NOTE HERE CLAIMED THE CUTOFF BROKE `release`. It did -- under the OLD
+  # refresh stopping rule, which could exit on a pass whose solve had failed. Fixing
+  # that rule (see faro/mode_edge/feasibility.py) removed the false negative. The
+  # cutoff was never the cause, which is worth recording because it nearly cost us the
+  # 4.2x.
   #
   # Verdicts, not poses. Those are different and the difference matters, because Alg. 1
   # warm-starts the KSO from these configurations. Measured on `grasp` at
@@ -129,25 +154,32 @@ collision:
   # -5 deg hyperextension limit. More rows is not a better answer -- Eq. 14 is
   # nonconvex, and the full row set lands Ipopt in a worse local minimum here.
   #
-  # ONE CAVEAT ON THE BUDGET ARGUMENT, recorded so the trade-off is not lost: Table II's
-  # own counts bound the filter much harder than two hours does. On the hard task the
+  # ON THE BUDGET, which is what this value is finally chosen against: Table II's own
+  # counts bound the filter far harder than two hours does. On the hard task the
   # M,E,KSO run spends ~850 s on 1415 KSO attempts and ~5150 s on 79.6 TO attempts, so
-  # ~1200 s is left for at least 2830 mode and edge checks -- under ~0.4 s each. Whatever
-  # the paper is doing here, it is not spending tens of seconds per mode.
-  # MEASURED, 2026-08-04, and this is why it is null. The acados KSO (Eq. 15) FAILS
-  # at 0.1 and SUCCEEDS with every pair, on the same sequence:
+  # ~1200 s is left for at least 2830 mode and edge checks. At 33 s each we managed one
+  # check per Alg. 1 iteration; at 0.10 the nine FEASIBLE entries of the tour average
+  # 1.7 s, which is that regime.
   #
-  #     53 pairs   QP_Solver_Failed  stat=2.18e+00  ineq=1.0e-03  cost=14.06
-  #    689 pairs   Solve_Succeeded   stat=1.46e-07  ineq=7.5e-16  cost=11.31   119 ms
+  # EQ. 14 ONLY. Eq. 15 reads `kso_activation_distance` below and wants the opposite.
+  activation_distance: 0.10
+
+  # Eq. 15 (KSO) ONLY. Falls back to `activation_distance` when this key is absent.
   #
-  # `fixed_pairs` freezes the pair set ONCE, at q_init, so a cutoff selects the pairs
-  # that are close at the START. The solve then travels away from there: pairs that
-  # become relevant en route carry no row at all, while the frozen ones get driven
-  # onto their boundaries -- a linearization that contradicts the geometry it is
-  # meant to describe, which HPIPM reports as MIN_STEP. Ipopt tolerated this; an SQP
-  # does not. The cutoff is a speed knob that costs correctness here, and Eq. 9 is
-  # over all pairs anyway.
-  activation_distance: null
+  # null -- every pair -- and that is not a preference, it is the difference between a
+  # solve and a failure. Measured 2026-08-04 on `reach`, acados SQP:
+  #
+  #      53 pairs   QP_Solver_Failed  stat=2.18e+00  ineq=1.0e-03  cost=14.06
+  #     689 pairs   Solve_Succeeded   stat=1.46e-07  ineq=7.5e-16  cost=11.31   119 ms
+  #
+  # WHY THE TWO STAGES DISAGREE, which is the whole reason this key exists: acados
+  # needs a FIXED parameter-block size, so `fixed_pairs` chooses the pair set ONCE at
+  # q_init and freezes it for the life of the compiled solver. Eq. 14 re-selects it at
+  # every refresh pass -- measured to settle in two passes -- and that re-selection is
+  # exactly what makes a cutoff safe there. Frozen, a pair that becomes relevant en
+  # route never gets a row, while the frozen ones are driven onto their boundaries;
+  # HPIPM reports the contradiction as MIN_STEP. Ipopt tolerated it, an SQP does not.
+  kso_activation_distance: null
 
   # ---- which pairs exist, and which of them ignore the cutoff ------------------
   # Three knobs, and they do genuinely different things:

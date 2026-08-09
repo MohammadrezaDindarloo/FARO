@@ -327,6 +327,26 @@ class SceneCollisionModel:
         return cls(scene=scene, bodies=bodies, pairs=pairs)
 
     # ------------------------------------------------------------ pair classes
+    @staticmethod
+    def activation_distance_for(settings: dict, stage: str) -> float | None:
+        """The cutoff for one stage, since Eq. 14 and Eq. 15 want opposite values.
+
+        Eq. 14 re-selects its pair set at every refresh pass, so a cutoff is safe --
+        swept over the tour, every value from 0.05 to 0.50 gives verdicts identical
+        to all-pairs, with 0.10 the cost optimum at 4.2x. Eq. 15 cannot: acados needs
+        a fixed parameter-block size, so `fixed_pairs` freezes the set once at q_init,
+        and a frozen cutoff measured as QP_Solver_Failed against Solve_Succeeded for
+        the full set.
+
+        One scene-level number therefore cannot serve both. `<stage>_activation_distance`
+        overrides `activation_distance`; ABSENCE of the key is what triggers the
+        fallback, not a null value -- null is a meaningful setting here ("every pair")
+        and must not be confused with "unset".
+        """
+        key = f"{stage}_activation_distance"
+        value = settings[key] if key in settings else settings.get("activation_distance")
+        return None if value is None else float(value)
+
     def always_active_pairs(self) -> set[tuple[int, int]]:
         """Pairs the scene config exempts from `activation_distance`.
 

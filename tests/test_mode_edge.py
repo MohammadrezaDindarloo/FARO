@@ -23,7 +23,7 @@ import pytest
 
 from faro.constraints.frames import normal_alignment_rows
 from faro.core.modes import ContactEdge, ContactMode
-from faro.mode_edge.feasibility import FeasibilityCache, check
+from faro.mode_edge.feasibility import FeasibilityCache, check, contradictory_contacts
 from faro.mode_edge.problem import RegularizationWeights, build_problem
 from faro.scene.scene import Scene
 from faro.solvers.nlp import solve
@@ -488,6 +488,72 @@ def test_an_impossible_edge_is_reported_infeasible(scene):
     assert check(scene, GRASP).feasible
     assert check(scene, on_front).feasible
     assert not check(scene, ContactEdge(GRASP, on_front)).feasible
+
+
+# =============================================================================
+# Rejecting an edge on geometry, with no solve (the same verdict, ~600x cheaper)
+# =============================================================================
+def test_a_contradictory_edge_is_decided_without_solving(scene):
+    """The Eq. 7a contradiction above, reached symbolically instead of numerically.
+
+    Same verdict, and that is the whole requirement -- this must be an accelerator,
+    never a relaxation. Measured: 65.04 s -> 0.07 s on `edge-regrasp`.
+    """
+    import time
+
+    on_front = mode(left_foot="floor", right_foot="floor", box_bottom="floor",
+                    left_hand="box_front", right_hand="box_rear")
+    started = time.perf_counter()
+    report = check(scene, ContactEdge(GRASP, on_front))
+    elapsed = time.perf_counter() - started
+
+    assert not report.feasible
+    assert report.result.status == "Contradictory_Contacts"
+    assert report.result.iterations == 0
+    assert elapsed < 1.0, f"a geometric verdict took {elapsed:.2f} s -- it solved something"
+
+
+@pytest.mark.parametrize("interface,a,b", [
+    ("left_hand", "box_left", "box_front"),     # perpendicular faces of the box
+    ("right_hand", "box_right", "box_rear"),
+    ("box_bottom", "floor", "tabletop"),        # parallel normals, planes 0.40 m apart
+])
+def test_the_three_incompatible_partner_pairs_on_this_scene(scene, interface, a, b):
+    before = mode(**{interface: a})
+    after = mode(**{interface: b})
+    assert contradictory_contacts(scene, ContactEdge(before, after))
+
+
+def test_a_mode_is_never_contradictory(scene):
+    """Eq. 1 gives every interface exactly one partner, so only edges can conflict."""
+    assert contradictory_contacts(scene, GRASP) == ""
+    assert contradictory_contacts(scene, STAND) == ""
+
+
+def test_acquiring_or_releasing_a_contact_is_not_a_contradiction(scene):
+    """`free` contributes no Eq. 7 rows, so it can never conflict with anything.
+
+    This is the test that keeps the filter honest: STAND -> GRASP is the ordinary
+    way a hand arrives on the box, and rejecting it would prune the whole task.
+    """
+    assert contradictory_contacts(scene, ContactEdge(STAND, GRASP)) == ""
+    assert contradictory_contacts(scene, ContactEdge(GRASP, STAND)) == ""
+    assert check(scene, ContactEdge(STAND, GRASP)).feasible
+
+
+def test_wreckage_is_not_mistaken_for_a_configuration():
+    """`np.isfinite` is not enough -- a failed solve returns FINITE nonsense.
+
+    Feeding it back cost 19 no-op refresh passes per restart, and handing it to GJK
+    crashed the process outright. Inside Alg. 1 that is a lost run and its cache.
+    """
+    from faro.mode_edge.feasibility import _is_configuration
+
+    assert _is_configuration(np.zeros(43))
+    assert _is_configuration(np.array([0.4, -0.2, 0.7, 0.0, 0.0, 0.0, 1.0]))
+    assert not _is_configuration(np.array([1.0, np.nan, 0.0]))
+    assert not _is_configuration(np.array([1.0, np.inf, 0.0]))
+    assert not _is_configuration(np.array([1.0, -1.8e308, 0.0]))   # finite, and wreckage
 
 
 # =============================================================================

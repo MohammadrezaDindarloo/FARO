@@ -180,46 +180,99 @@ all ten tour entries flip to infeasible. The paper's `margin = 0` is not just it
 choice — it is the only one available unless the mode's own contact pairs are excluded
 from Eq. 9, which is a package deal, not an independent knob.
 
-## Where the time goes (and why the printed ms is not it)
+## Where the time goes, and how it got 43× cheaper
 
-Profiled on `grasp`, all 689 pairs, reproducible run to run:
+The ten-demo tour, same verdicts throughout:
 
 ```
-check() total                     32.9 s
-  pass 1   28.9 s   772 iters   Infeasible_Problem_Detected   <- 87%, discarded
-  pass 2    2.0 s    51 iters   Solve_Succeeded
-  pass 3    0.9 s     9 iters   Solve_Succeeded               <- the one reported
+82.46 s  ->  19.07 s        8.25  ->  1.91 s per check
 ```
 
-| | share |
-|---|---|
-| Ipopt iterating | 89% |
-| `ca.nlpsol` rebuilding the Jacobian/Hessian graphs | 6% |
-| GJK witness queries + 689 CasADi rows | 3% |
-| the all-pairs penetration audit | 0.2% |
+and before that work it was 333 s. The number that mattered was never the mean — it
+was the **infeasible** check, because a pruning filter says *no* far more often than
+*yes*, and `edge-regrasp` alone was 79% of the tour at 65 s.
 
-Two things follow. **Building the NLP is not the bottleneck** — rebuilding it from
-scratch every pass costs 6%, so caching it would buy almost nothing. **Pass 1 is
-practically the whole cost**, and its answer is thrown away: linearized at `q_nom`, the
-689 collision rows describe geometry the solution is nowhere near, so Ipopt grinds to
-772 iterations and reports `Infeasible_Problem_Detected`. Re-linearized once at that
-bad-but-closer point, pass 2 converges in 51.
+Four measurements, in the order they were made:
 
-So `result.wall_time` is the **last** pass, and the last pass is by construction the
-cheapest one in the sequence — it starts from the previous answer and only confirms it.
-`FeasibilityReport.wall_time` is the number to quote; on `grasp` they are 0.24 s and
-33 s. This mattered beyond cosmetics: the ~0.4 s per check that Table II implies has to
-be compared against the outer number, not the inner one.
+**1. It is Ipopt, not construction.** One pass on `grasp` splits 3.23 s of solve
+against 0.66 s of symbolic building. Rebuilding the NLP every pass is ~17%, so
+caching it would buy almost nothing. (An earlier version of this file claimed the
+opposite; it was wrong.)
 
-## Cost, and the knob you may want
+**2. The refresh loop never terminated on its own.** The rule was "settled AND
+clean", and the *settled* half never fired — re-linearizing at a new point perturbs
+the rows enough to keep `max|dq|` above `1e-4` forever, so the iterate circles the
+constraint boundary and the **cap**, not convergence, ended every loop. `lift` used
+20 of 20 passes and was already clean at pass 1.
 
-Every pair gets a row by default (`activation_distance: null`), which is the slow and
-complete option. Schulman's activation distance is implemented and measured: at
-**0.10 m** only 53 of 689 pairs are active at the nominal pose, giving a ~12× cut in
-rows, **6–20× faster**, and **identical verdicts** on every entry compared.
+Dropping that half alone made things **slower** (413 s → 548 s): the loop could then
+exit on a pass whose solve had *failed* but whose geometry happened to be clean, and
+`check` discards a non-converged result and restarts — buying a fresh twenty passes.
+The rule that works is **converged AND clean**.
 
-Worth knowing before deciding: Table II's own counts bound this filter much harder than
-the two-hour budget does. On the hard task the `M,E,KSO` run spends ~850 s on 1415 KSO
-attempts and ~5150 s on 79.6 TO attempts, leaving ~1200 s for at least 2830 mode and
-edge checks — **under ~0.4 s each**. Whatever the paper is doing, it is not spending
-tens of seconds per mode.
+**3. A failed solve returns finite wreckage.** Entries around `1e308` — finite, so an
+`isfinite` guard sails past them. Feeding that back as the next linearization point
+made Ipopt reject the point *without running* (`Invalid_Number_Detected`, 0
+iterations) and return it unchanged, so the loop spun **19 no-op passes**, twice over.
+The same coordinates reaching GJK raised `coincident body origins` and **took the
+process down** — inside Alg. 1, a lost two-hour run and its entire cache.
+`_is_configuration` bounds the magnitude; `tests/test_mode_edge.py` pins it.
+
+**4. A failing pass is not a reason to stop.** `place` reports
+`Infeasible_Problem_Detected` on passes 1, 2 and 3 and converges on pass 4. Stopping
+at the first such status — which looked obviously right — would have made it a false
+negative.
+
+## Deciding an edge without solving it
+
+An edge is the union `c1 ∪ c2`, so an interface that changes partner appears with
+**both**. Eq. 7a then needs one flat patch flush against two patches at once — and
+when those two are fixed to the same rigid body, that is decidable from geometry:
+normals must be parallel *and* the planes must coincide. Three pairs fail on this
+scene:
+
+```
+left_hand    box_left  + box_front    perpendicular normals
+right_hand   box_right + box_rear     perpendicular normals
+box_bottom   floor     + tabletop     parallel, planes 0.40 m apart
+```
+
+**6176 of 11556 ordered edges (53.4%)** are settled this way, in microseconds instead
+of 35–51 s. This is an accelerator, never a relaxation: it returns the same verdict
+Eq. 14 returns, for the same reason. Validated on eight sampled caught edges — Eq. 14
+agreed eight times out of eight. `contradictory_contacts()` returns the reason, `""`
+when nothing is decidable, and an empty string is **not** a feasibility claim.
+
+Only edges are ever tested: Eq. 1 gives a mode exactly one partner per interface, so
+a mode cannot contradict itself this way.
+
+## The collision cutoff, swept
+
+`activation_distance: 0.10` — chosen by measurement, not by taste. Every value from
+0.05 to 0.50 gives **verdicts identical** to all-pairs; the cost is a U-curve:
+
+| cutoff | per check | vs 689 |
+|---|---|---|
+| null (689 pairs) | 33.3 s | 1.0× |
+| 0.05 | 12.1 s | 2.8× |
+| **0.10** | **7.9 s** | **4.2×** |
+| 0.20 | 9.6 s | 3.5× |
+| 0.30 | 12.7 s | 2.6× |
+| 0.50 | 43.1 s | 0.8× |
+
+Both ends cost, for opposite reasons: too few rows and the refresh loop needs more
+passes to settle the active set (`grasp` takes 6 at 0.05 against 2 at 0.10); too many
+and every solve pays for pairs that were never near mattering. At the reference
+answers the closest non-contact pair is **0.6–9.5 mm**, so 0.10 carries ~10× the
+headroom the geometry needs, while 0.30 quadruples the rows to capture pairs at a
+median distance of 0.43 m.
+
+The active set does **not** thrash: it converges in two passes and stops. Pass 1 of
+`grasp` "succeeds" while 283 mm inside something, because those pairs had no rows;
+pass 2 adds them and it comes out clean. That is Schulman's procedure working, and
+it is why the audit — not a movement test — has to be the stopping criterion.
+
+**Eq. 15 needs the opposite** and reads `kso_activation_distance` instead. acados
+requires a fixed parameter-block size, so its pair set is frozen once at `q_init`;
+a frozen cutoff measured `QP_Solver_Failed` against `Solve_Succeeded` for the full
+set. `SceneCollisionModel.activation_distance_for` is the one place that resolves it.

@@ -159,7 +159,8 @@ def build(scene: Scene, sequence: ContactSequence, *,
     pairs = []
     if model_c is not None:
         settings = scene.collision
-        activation = settings.get("activation_distance", None)
+        # Eq. 15's own cutoff, which is NOT Eq. 14's -- see `activation_distance_for`.
+        activation = model_c.activation_distance_for(settings, "kso")
         # `q_init` is the WHOLE scene configuration (robot + objects); the collision
         # queries want the robot part and the object poses separately.
         from faro.mode_edge.feasibility import _object_poses
@@ -167,7 +168,7 @@ def build(scene: Scene, sequence: ContactSequence, *,
         init_state = syms[0].split(q_init)
         pairs = model_c.fixed_pairs(
             init_state["robot"], _object_poses(scene, init_state),
-            activation_distance=None if activation is None else float(activation),
+            activation_distance=activation,
             always_active=model_c.always_active_pairs())
 
     slip = no_slip_blocks(scene, sequence, syms, yaw=yaw)
@@ -183,7 +184,7 @@ def build(scene: Scene, sequence: ContactSequence, *,
     # outright, so a silent stale load is the worst failure mode available here.
     fingerprint = "|".join(str(x) for x in (
         scene.name, sequence.label(), len(pairs), n, nk,
-        scene.collision.get("activation_distance"),
+        SceneCollisionModel.activation_distance_for(scene.collision, "kso"),
         scene.collision.get("relax_contact_pairs"),
         scene.collision.get("margin"), scene.collision.get("contact_pair_margin"),
         alignment, yaw, repr(goal), nlp_solver_type, hessian_approx, globalization,

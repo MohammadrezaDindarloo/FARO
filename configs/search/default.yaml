@@ -1,0 +1,86 @@
+# Alg. 1's parameters. Everything the paper states is quoted next to its value; the
+# rest is flagged as an ambiguity with our chosen default.
+name: default
+
+# ================================================================================
+# Eqs. 18 and 19 -- STATED BY THE PAPER, do not change these to "tune" a run.
+#
+#   "The coefficients are set as k = 1.0, alpha = 0.5 and C = 3."   -- Section III
+#
+# C     exploration coefficient in Eq. 18. Cost-based UCT SUBTRACTS the bonus and
+#       takes an argmin, so larger C means more exploration, same as usual.
+# k     progressive-widening scale in Eq. 19, M(v) = max{1, k N(v)^alpha}.
+# alpha progressive-widening exponent.
+#
+# Worth knowing about the scales: J is a raw Eq. 14/15 objective, order 10-15 on
+# this scene, and the exploration term is at most C * sqrt(log(N+1)) which is a few
+# units early on and decays. So the two are comparable without normalization, which
+# is why none is applied. If a scene ever makes J much larger, exploration goes
+# inert and that has to be dealt with explicitly rather than by silently rescaling.
+uct:
+  C: 3.0
+  k: 1.0
+  alpha: 0.5
+
+# ================================================================================
+# Section IV-B: "a two-hour time budget per run and a max depth of 5 switches".
+#
+# Depth counts SWITCHES, and the root is c_0, so depth 5 means sequences of up to
+# six modes. `budget` is in seconds; 7200 is the paper's.
+budget: 7200.0
+max_depth: 5
+
+# ================================================================================
+# AMBIGUITY (docs/ambiguities.md #31): the successor set.
+#
+#   all     every mode Table IV allows, minus the current one. 3*3*2*2*3 = 108,
+#           which is exactly the paper's stated "maximum branching factor of 108",
+#           so this is the faithful reading. A transition may change several
+#           contacts at once; filter E is what rejects the ones that cannot happen
+#           at an instant.
+#   single  one interface changes per transition (8 successors here). Minimal
+#           transitions, ~13x smaller branching, but cannot express a simultaneous
+#           two-handed release.
+successor_policy: all
+
+# ================================================================================
+# Filters, Eq. 21:
+#
+#   F1 = (KSO)            F2 = (M, E, KSO)
+#   F3 = (M, E, KSO, TO)  F4 = (TO)
+#
+# Name a variant, or list filters explicitly as [M, E].
+#
+# DEFAULT IS [M, E], WHICH IS NOT ONE OF THE PAPER'S VARIANTS, and that is
+# deliberate for now: every paper variant contains KSO or TO, and our acados KSO
+# regenerates and recompiles C for each distinct SEQUENCE (~580 s), which in a
+# two-hour budget allows about twelve KSO calls against the paper's 1415. Running
+# [M, E] builds the tree and the mode/edge caches honestly while that is solved.
+# Switch to F2 once the KSO is reusable across sequences.
+filters: [M, E]
+
+# ================================================================================
+# The task. AMBIGUITY (docs/ambiguities.md #30): the paper never defines GOAL, and
+# says only that "the objective is to place the white box on the platform".
+#
+# Expressed as a partial mode the TERMINAL mode must match -- "the box is on the
+# platform" is a contact condition, not a configuration. Interfaces not named here
+# are unconstrained, so this does not dictate where the hands are.
+#
+# `released` additionally requires those interfaces to be free, i.e. "placed AND let
+# go". Empty by default because the paper's sentence does not ask for it.
+goal:
+  require:
+    box_bottom: tabletop
+  released: []
+
+# The root c_0 of Alg. 1 line 1. A partial assignment; unnamed interfaces are free.
+# This is the robot standing with the box on the floor, which is where Fig. 4 starts.
+root:
+  left_foot: floor
+  right_foot: floor
+  box_bottom: floor
+
+# Section IV-B varies this across five runs: "different seeds controlling the random
+# successor selection". It seeds PROPOSESUCCESSOR's shuffle and nothing else.
+seed: 0

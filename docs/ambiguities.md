@@ -108,6 +108,44 @@ step 0, before the robot touches it, because that is cheaper than reaching. Insi
 Alg. 1 this cannot be the intent -- a node has a known state. `anchor_initial=True`
 adds the constraint; it is **off** by default because the paper does not write it.
 
+## Milestone 5 (tree search, Alg. 1 and Section III)
+
+**#30 -- `GOAL(C+)` is never defined.** Alg. 1 line 13 calls it and the paper says
+only that "the objective is to place the white box on the platform" (Fig. 4). We
+express it as a **partial terminal mode** the last mode must match, because "the box
+is on the platform" is a contact condition and not a configuration. Default for
+`box_placement`: `box_bottom -> tabletop`; interfaces not named stay unconstrained,
+so it does not dictate where the hands are. `goal.released` optionally also requires
+interfaces to be free ("placed AND let go"), **off** by default since the paper's
+sentence does not ask for it. Config: `goal:` in `configs/search/*.yaml`.
+
+**#31 -- the successor set of `PROPOSESUCCESSOR` is never defined.** One number
+constrains it: "the allowed contact interfaces are listed in Table IV, yielding a
+maximum branching factor of 108" (Section IV-B). 108 is exactly the Cartesian product
+over Table IV, i.e. **all modes** -- not the 8 reachable by changing one interface.
+So `successor_policy: all` is the faithful default, and a transition may change
+several contacts at once; filter E is what rejects the ones that cannot happen at an
+instant. `single` (one interface per transition) is available and measurable.
+
+**#32 -- which nodes have `N(.)` incremented is never stated.** Eq. 18 and Eq. 19
+both read visit counts, and nothing in Alg. 1 says when they change. We increment
+along the **selection path**, the UCT convention. It is not cosmetic: without it
+Eq. 19 never widens past one child and Eq. 18's exploration term never decays, so
+the search expands each node once and degenerates into a random walk.
+
+**#33 -- `J` is not backed up.** Section III: a candidate "is added to the tree and
+assigned the cost J returned by the final filter in F". Read literally, `J(u)` in
+Eq. 18 is the node's **own** cost, fixed at admission, with no backup step -- which
+is unusual for a UCT, because a cheap subtree is then invisible in its ancestors'
+scores. We implement the literal reading. Flagged rather than silently "fixed",
+since a backup would change which branches the search prefers.
+
+**Not an ambiguity, but recorded here:** `J` is a raw Eq. 14/15 objective (order
+10-15 on this scene) while Eq. 18's exploration term is at most `C*sqrt(log(N+1))`,
+a few units. The two are comparable without normalization, so none is applied. On a
+scene where `J` is much larger, exploration would go inert -- that needs handling
+explicitly, not by silently rescaling the paper's coefficients.
+
 ## Already known, to be resolved in later milestones
 
 These are flagged now because they are visible from the paper text alone, and will
