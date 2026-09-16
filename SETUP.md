@@ -89,11 +89,18 @@ coal, MuJoCo, Meshcat) has a maintained conda-forge binary. Building Pinocchio o
 coal from source pulls in Boost, Eigen, urdfdom, and hpp-fcl version-matching pain
 that has nothing to do with understanding the paper. We use binaries.
 
-**The one exception is `acados`** (optional faster SQP backend, Milestone 5+). It
-has no usable conda package and does need a CMake source build plus `t_renderer`.
-It is deliberately *not* in `environment.yml`: the solver interface is designed so
-acados can be added later as an alternative backend without touching any other
-module. Do not build it now.
+**The one exception is `acados`**, which is **required from Milestone 4 on**. §II-G
+solves the KSO (Eq. 15) with acados SQP, and `faro/kso/` has no other backend. It has
+no usable conda package and needs a CMake source build plus `t_renderer`, so it is
+not in `environment.yml`. It lives in `third_party/acados`, and
+`faro/utils/acados_env.py` expects the built libraries under `third_party/acados/lib/`
+(`libacados.so`, `libblasfeo.so`, `libhpipm.so`, `libqpOASES_e.so`).
+
+**Reproducibility gap, still open:** `third_party/acados` is committed as a submodule
+pointer (commit `a26c7d0`) with **no `.gitmodules`**, so a fresh clone gets an empty
+directory. The error message in `acados_env.py` also points to
+`scripts/setup_acados.sh`, **which does not exist**. The build steps still need to be
+written down here.
 
 ### Docker fallback
 

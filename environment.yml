@@ -4,7 +4,7 @@
 #
 # Everything here comes from conda-forge as a prebuilt binary. There is deliberately
 # no source build in this file -- see SETUP.md for why, and for the one optional
-# exception (acados, Milestone 5+).
+# exception (acados, required from Milestone 4; see SETUP.md §3).
 name: faro
 
 channels:

@@ -64,7 +64,13 @@ is entirely in M and E.**
 variant in Eq. 21 contains KSO or TO. Our acados KSO regenerates and recompiles C
 per distinct sequence (~580 s), which in a two-hour budget allows roughly twelve
 calls against the paper's 1415. Until the KSO is reusable across sequences, `[M, E]`
-builds the tree and the caches honestly. TO raises `NotImplementedError` rather than
+builds the tree and the caches honestly.
+
+**Before F2 runs for real, two KSO issues need fixing** (see `faro/kso/README.md`).
+First, `verify` calls `check_kso` with neither `q_init` nor a warm start, so every KSO
+starts from the tiled nominal pose, with `q_init` taken from that guess. Second,
+`q_init` is not in the solver cache key. §IV-C blames the paper's false negatives on
+exactly this kind of poor initialization. TO raises `NotImplementedError` rather than
 being skipped: F3 without TO is not F3, and a missing filter must never read as a
 pass.
 

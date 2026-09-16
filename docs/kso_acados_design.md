@@ -1,5 +1,15 @@
 # KSO on acados SQP — design
 
+> **Status (2026-09-16): this design was implemented and works.** Steps 1–4 of "Order
+> of work" below are done, and the Ipopt KSO path is deleted. The "open problem"
+> section was resolved like this:
+> Gauss–Newton is not used. `hessian_approx=EXACT` with `regularize_method=CONVEXIFY`
+> (route 2), plus warm starts from the **edge** solutions of filter E (route 1, but
+> from edges, not modes). Two things only showed up in measurement: (a) the frozen
+> pair set must be all 689 pairs, since 53 gives `QP_Solver_Failed`, and (b) stage 0
+> needs `con_h_expr_0`. What is still open is not on this page: code generation for
+> every sequence (~580 s), and `q_init` (see `faro/kso/README.md`).
+
 Section II-G is explicit and both halves matter:
 
 > "Both (15) and (17) are implemented using a direct multiple-shooting transcription.

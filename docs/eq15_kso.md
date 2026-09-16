@@ -28,31 +28,21 @@ Eq. 16, verbatim:
     b_s != empty  AND  b_{s+1} = empty    (16b)   contact release
 ```
 
-## Status: implemented exactly, on Ipopt
+## Status (2026-09-16): implemented, on acados SQP
 
-Every line of Eq. 15 above is built by `faro/kso/problem.py::build_problem` and
-verified by `scripts/04_kso_demo.py`. The ONE deviation from the paper is the solver:
-Section II-G specifies acados SQP for the KSO and we use Ipopt.
+Every line of Eq. 15 above is built by `faro/kso/problem.py` and solved by
+`faro/kso/acados_solver.py`, with the solver §II-G names. **An earlier version of
+this section said acados had been tried and removed in favour of Ipopt. That is no
+longer true.** acados came back once the GJK witnesses became parameters and the
+Hessian was switched to EXACT + CONVEXIFY. The Ipopt KSO path is deleted. See
+`kso_acados_design.md` for how the encoding problems below were resolved.
 
-acados was built, integrated as a multi-phase OCP (one phase per knot) and removed
-again. It is recorded here because the reasons are worth keeping:
+What remains open is listed in `paper_alignment.md` §4: how `q_init` is chosen, the
+gap in the build-cache key, and code generation for every sequence.
 
-* expressing Eq. 15 in acados needs a control `u` with `x_{s+1} = x_s + u_s`, because
-  an acados path constraint sees only `(x_k, u_k)` and Eq. 8 couples `q_s` with
-  `q_{s+1}`. Eq. 15 has no controls, so `u` is an artifact of the encoding.
-* Gauss-Newton then has no curvature in the `u` directions, and the only fixes are to
-  put a cost on `u` -- which Eq. 15 does not have, and which changes the problem -- or
-  to regularize, which is the same thing by another name.
-* with `SQP_WITH_FEASIBLE_QP` it iterates rather than failing at the first QP, but
-  diverges from the cold start: 1237 iterations, base at z = 5.8 m, box 2.8 m away.
-  Ipopt solves the identical problem in 15 s.
+## What an earlier implementation got wrong — ALL FIXED, kept as history
 
-The rule applied was the user's: the equations are the paper's and only the solver may
-differ. Adding a cost term to make acados converge would have inverted that.
-
-## What an earlier implementation got wrong
-
-| # | Paper | What `faro/kso/problem.py` currently does | Severity |
+| # | Paper | What `faro/kso/problem.py` USED to do (all five now match the paper) | Severity |
 |---|---|---|---|
 | 1 | **K+1 configurations** `q_0..q_K` for K modes `c_0..c_{K-1}`, with `c_K := c_{K-1}` | one configuration per mode (K) | structural |
 | 2 | **`contact(q_s, c_{s-1} U c_s)`** — the EDGE, the union of the previous and current mode | `contact(q_s, c_s)` — the current mode only | **the big one** |
@@ -79,15 +69,16 @@ order the filters.
 ## Resolved ambiguities
 
 * **#27 (K vs K+1) — RESOLVED.** K+1 configurations, K modes, `c_K := c_{K-1}`.
-* **#29 (initial state) — RESOLVED.** `q_0 = q_init` is in the paper. Not optional,
-  and it pins the whole configuration, not just object poses.
+* **#29 (initial state) — RESOLVED as a formulation question.** `q_0 = q_init` is in the paper. It is
+  not optional, and it pins the whole configuration, not just object poses. **Still
+  open as a data question:** where `q_init` comes from (see below).
 * **#28 (the cost) — CONFIRMED.** `sum_s (q_s - q_nom)^T W (q_s - q_nom)`, exactly the
   generalization of Eq. 14 we defaulted to. The `smoothness` term is ours and is not
   in the paper; it should stay at 0.0 to be faithful.
 
 ## New open questions
 
-* **`Q_goal`** — the paper gives it a name and no definition here. For box-placement it
+* **`Q_goal`** — PARTLY ADDRESSED: `goal=` takes a partial mode and adds its contact rows at knot K. The paper gives it a name and no definition here. For box-placement it
   is presumably "box bottom in contact with the tabletop", i.e. a set expressed through
   contact rather than a fixed configuration. Needs to be a config-level object.
 * **`q_init`** — the full scene state, including the robot. Our

@@ -20,7 +20,7 @@ run.
 | **KSO** (kinematic sequence opt.) | Eq. 15 | Is there a *geometrically* consistent sequence of K+1 configurations? | medium |
 | **TO** (trajectory opt.) | Eq. 17 | Is there a full *dynamically* feasible trajectory? | expensive |
 | **Tree search** | Alg. 1 | Which contact-mode sequence should we try? (UCT + progressive widening) | — |
-| **LLM sampling** | — | Propose plausible contact plans to filter | — |
+| **LLM sampling** | §IV-C | Propose plausible contact plans for the KSO to filter | — |
 
 Shared constraint definitions (Section II-C, Eqs. 7–13) live in one place,
 `faro/constraints/`, and are reused by every stage.
@@ -29,9 +29,11 @@ Shared constraint definitions (Section II-C, Eqs. 7–13) live in one place,
 
 - **In scope:** simulation-only validation of the full hierarchy, Milestones 0–7.
 - **Out of scope:** the RL controller and real-hardware execution.
-- **No Hippo.** The paper's TO solver is not open source. Everything uses
-  **Ipopt via CasADi**; the solver interface is structured so acados can be added
-  later as an optional backend.
+- **Solvers follow §II-G wherever possible.** Eq. 14 (mode/edge) → **Ipopt**, as
+  the paper does. Eq. 15 (KSO) → **acados SQP**, as the paper does (built from source
+  under `third_party/acados`). Eq. 17 (TO) → the paper uses **Hippo**, which is not
+  open source; the planned substitute is Ipopt, so TO verdicts are comparable to
+  the paper and TO wall-clock times are not.
 
 ## Setup
 
@@ -54,19 +56,23 @@ FARO/
 ├── pyproject.toml             # makes `faro` importable via `pip install -e .`
 ├── SETUP.md                   # cluster setup, Meshcat forwarding, GL backends
 ├── configs/                   # YAML: swap robot / scene / solver without code changes
-│   ├── robots/  scenes/  solvers/  tasks/
-├── assets/                    # local URDFs + meshes
+│   ├── robots/  scenes/  solvers/  search/  collision/  tasks/
+├── assets/                    # local URDFs + meshes (G1 with hands cut at the wrist)
+├── third_party/
+│   ├── acados/                # acados source + build (the KSO solver, §II-G)
+│   └── acados_generated/      # generated + compiled KSO solvers, one dir per fingerprint
 ├── faro/                      # the importable package
 │   ├── core/                  # shared vocabulary: ContactMode, ContactPatch, Interface
 │   ├── robots/                # URDF loading, Pinocchio wrappers (numeric + symbolic)
 │   ├── scene/                 # scene definition, allowed contact interfaces
 │   ├── constraints/           # shared CasADi constraint blocks, Eqs. 7-13
-│   ├── solvers/               # backend-agnostic NLP interface; Ipopt now, acados later
+│   ├── solvers/               # NLP interface (Ipopt, used by Eq. 14)
 │   ├── mode_edge/             # mode + edge feasibility, Eq. 14
-│   ├── kso/                   # kinematic sequence optimization, Eq. 15
-│   ├── to/                    # trajectory optimization, Eq. 17
+│   ├── kso/                   # kinematic sequence optimization, Eq. 15 (acados)
+│   ├── to/                    # trajectory optimization, Eq. 17 (empty — Milestone 6)
 │   ├── search/                # feasibility-guided UCT tree search, Alg. 1
-│   ├── llm/                   # LLM contact-plan sampling
+│   ├── llm/                   # LLM contact-plan sampling (empty — Milestone 7)
+│   ├── scenarios/             # hand-authored demos for Milestones 2–4
 │   ├── viz/                   # Meshcat + MuJoCo helpers
 │   └── utils/                 # config loading, paths, logging
 ├── scripts/                   # numbered, runnable, standalone demos
@@ -81,16 +87,75 @@ as that milestone is built.
 
 ## Milestone status
 
+*Last reviewed 2026-09-16 against the code at commit `6f97f8d` plus uncommitted work.*
+
+**Test suite (2026-09-16): 544 passed, 8 skipped, 2 failed, in 237 s.** Both failures
+are Eq. 8 yaw tests from Milestone 2 (`test_8_detects_spinning_about_the_normal`,
+`test_8_spin_isolates_the_yaw_row_with_zero_translation`). They expect the yaw row to
+equal θ, and it now returns sin θ (−0.04998 vs −0.05). That is the `log3` form versus
+the `column` form. Milestone 4 switched the Eq. 8 default to `yaw="column"`, and these
+tests were not updated. The verdicts are unaffected, since both forms vanish at the
+same place, but the tests are out of date.
+
 | # | Milestone | Script | Status |
 |---|---|---|---|
 | 0 | Environment & scaffolding | `00_check_install.py` | **done** — 17/17 checks pass |
-| 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | **done** — 48/48 tests pass, branching factor 108 reproduced |
-| 2 | Shared constraints (Eqs. 7–13) | `02_constraint_playground.py` | **done** — 441 tests; 28/28 constraints fail exactly where predicted |
-| 3 | Mode/edge feasibility (Eq. 14) | `03_mode_feasibility.py` | **done** — contact (7a/7b) + collision (9) + limits (13a) on Ipopt, as Section II-G specifies. **1.9 s per check**, down from 33 s |
-| 4 | KSO (Eq. 15) | `04_kso_demo.py` | **in progress** — Eq. 15 on acados SQP with parametric witnesses; solve is 0.17 s, but code generation is ~580 s per distinct sequence |
-| 5 | Tree search (Alg. 1) | `05_tree_search.py` | **in progress** — Eqs. 18/19 and the filter pipeline run; `F = [M, E]` searches, `F2` waits on the KSO build cost |
-| 6 | TO (Eq. 17) | `06_to_demo.py` | not started |
-| 7 | LLM contact-plan sampling | `07_llm_sampling_demo.py` | not started |
+| 1 | Robot loading & visualization | `01_load_and_visualize_robot.py` | **done** — branching factor 108 reproduced |
+| 2 | Shared constraints (Eqs. 7–13) | `02_constraint_playground.py` | **done** — 28/28 constraints fail exactly where predicted |
+| 3 | Mode/edge feasibility (Eq. 14) | `03_mode_feasibility.py` | **done** — contact (7a/7b) + collision (9) + limits (13a) on Ipopt, as §II-G specifies. **1.9 s per check**, down from 33 s |
+| 4 | KSO (Eq. 15) | `04_kso_demo.py` | **in progress** — see below |
+| 5 | Tree search (Alg. 1) | `05_tree_search.py` | **in progress** — see below |
+| 6 | TO (Eq. 17) | `06_to_demo.py` | not started (`faro/to/` is empty) |
+| 7 | LLM contact-plan sampling | `07_llm_sampling_demo.py` | not started (`faro/llm/` is empty) |
+
+### Milestone 4 — where it stands
+
+Done:
+
+- Eq. 15 is fully formulated in `faro/kso/problem.py`: K+1 knots with `c_K := c_{K-1}`,
+  the **edge** `c_{s-1} ∪ c_s` at every knot s ∈ {1..K}, Eq. 8 no-slip gated by
+  16a/16b, `q_0 = q_init`, an optional terminal goal set, and the Σ_{s=0}^{K} cost.
+- Solved on **acados SQP** (§II-G) as a multi-phase OCP, one phase per knot. GJK
+  witnesses are acados parameters, so Eq. 9 is re-linearized without regenerating C.
+  **The Ipopt KSO path and its outer refresh loop are deleted.**
+- On `reach`: one SQP call, 119 ms, residuals at machine precision. This needs all
+  689 collision pairs (`kso_activation_distance: null`); the 53-pair cutoff fails.
+- Contradictory edges are rejected from geometry before any code generation, and
+  warm starts are seeded from the **edge** solutions of filter E.
+
+Open (in the order they block things):
+
+1. **Code generation per distinct sequence** — about 580 s cold, 10 s with the `.so`
+   cache, 0.17 s to solve. Table I's 0.14–1.93 s per KSO means the paper reuses one
+   compiled structure across sequences. The fix is to pass the contact mode in at
+   runtime (for example as parameters or bounds), with one solver per horizon length.
+   **This is what blocks F2 in the tree search.**
+2. **`q_init` is not decided.** Eq. 15 pins `q_0 = q_init`, and Eq. 8 then fixes the
+   feet for the whole sequence. We currently take `q_init` from the nominal pose or
+   from knot 0 of the initial guess, and with that `reach` is infeasible. The most
+   faithful option is to declare `q_init` in the scene YAML, since the paper treats it
+   as a task input. See [faro/kso/README.md](faro/kso/README.md).
+3. **Cache-key gap:** `q_init` is compiled into the solver (`constraints.x0`) but is
+   **not** part of the build fingerprint or the in-process `_BUILT` key. Two calls on
+   the same sequence with different `q_init` values can therefore reuse a solver built
+   for the first one.
+4. Uncommitted work: a `regularize_method` option in `acados_solver.build`
+   (`CONVEXIFY` makes `levenberg_marquardt` do nothing) and 7 new K=2 builds under
+   `third_party/acados_generated/` from 2026-08-09. What those runs showed is not
+   written down anywhere.
+
+### Milestone 5 — where it stands
+
+Done: Alg. 1 loop, Eq. 18 (cost-based UCT, argmin), Eq. 19 (progressive widening),
+k = 1.0, α = 0.5, C = 3, depth cap 5, successor set of 108, the filter pipeline for all
+of Eq. 21, per-filter caches, and `GOAL` as a partial terminal mode. `tests/test_search.py`
+covers these without a solver.
+
+Open: the default filters are `[M, E]`, which is **not** one of the Eq. 21 variants.
+F1/F2 wait on Milestone 4 item 1. F3/F4 and Alg. 1 line 17 wait on the TO (Milestone
+6). Until then, goal-reaching sequences are recorded with `to_verified=False`. The
+search calls the KSO with neither a `q_init` nor a warm start.
+Section IV-C blames the paper's own false negatives on poor initialization.
 
 Milestones 5 and 6 are swapped relative to the paper's section order, because the
 tree search only needs Eq. 14 to do useful work while the TO needs a solver we do not
@@ -99,8 +164,8 @@ have yet (Hippo is not public).
 ## Stack
 
 CasADi (symbolic + autodiff) · Pinocchio (kinematics/dynamics, centroidal momentum) ·
-coal (GJK witness points + normals) · Ipopt (NLP) · MuJoCo (physics + headless render) ·
-Meshcat (browser 3D viz) · acados (optional, later)
+coal (GJK witness points + normals) · Ipopt (Eq. 14) · acados SQP + HPIPM (Eq. 15) ·
+MuJoCo (physics + headless render) · Meshcat (browser 3D viz)
 
 ## Robot
 
@@ -207,6 +272,20 @@ in order of size (details in [faro/mode_edge/README.md](faro/mode_edge/README.md
 - **Not re-linearizing at wreckage.** A failed solve returns *finite* nonsense
   (~1e308) that `isfinite` waves through. It cost 19 no-op passes per restart — and
   crashed the process when it reached GJK.
+
+## Milestone 4 — Eq. 15 on acados
+
+```bash
+python scripts/04_kso_demo.py --list
+python scripts/04_kso_demo.py -s reach --drift   # contact drift table, no viewer
+python scripts/04_kso_demo.py -s regrasp         # rejected from geometry in ~0.4 s
+```
+
+**Check the drift table, not just the solver status.** acados once reported
+`eq = 2.2e-16` while the feet slid 521.7 mm, because stage 0's constraints go in
+`con_h_expr_0`, not `con_h_expr`. **Don't interrupt a cold build** after
+`rendered solver templates successfully`: acados deletes the output directory
+before regenerating. Details: [faro/kso/README.md](faro/kso/README.md).
 
 ## Milestone 5 — the tree search (Alg. 1)
 

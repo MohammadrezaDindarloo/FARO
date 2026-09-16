@@ -124,6 +124,7 @@ def build(scene: Scene, sequence: ContactSequence, *,
           nlp_solver_type: str = "SQP", hessian_approx: str = "EXACT",
           globalization: str | None = "MERIT_BACKTRACKING",
           levenberg_marquardt: float = 0.0, qp_iter_max: int = 500,
+          regularize_method: str | None = None,
           verbose: bool = False) -> AcadosKSO:
     """Generate and compile the multi-phase OCP for `sequence`.
 
@@ -188,7 +189,7 @@ def build(scene: Scene, sequence: ContactSequence, *,
         scene.collision.get("relax_contact_pairs"),
         scene.collision.get("margin"), scene.collision.get("contact_pair_margin"),
         alignment, yaw, repr(goal), nlp_solver_type, hessian_approx, globalization,
-        levenberg_marquardt, qp_iter_max, tol, max_iter,
+        levenberg_marquardt, qp_iter_max, regularize_method, tol, max_iter,
     ))
     tag = hashlib.sha1(fingerprint.encode()).hexdigest()[:10]
     labels = []
@@ -274,8 +275,14 @@ def build(scene: Scene, sequence: ContactSequence, *,
     ocp.solver_options.nlp_solver_type = nlp_solver_type
     ocp.solver_options.qp_solver = "PARTIAL_CONDENSING_HPIPM"
     ocp.solver_options.hessian_approx = hessian_approx
-    if hessian_approx == "EXACT":
-        ocp.solver_options.regularize_method = "CONVEXIFY"
+    # REGULARIZATION, and the two knobs interact. `CONVEXIFY` replaces the Hessian
+    # rather than shifting it, so it makes `levenberg_marquardt` inert: measured on
+    # `reach`, lm from 0 to 1.0 gave bit-identical results down to the QP iteration
+    # count (13 every time). If you need LM to do anything, this must not be CONVEXIFY.
+    method = regularize_method if regularize_method is not None else (
+        "CONVEXIFY" if hessian_approx == "EXACT" else None)
+    if method:
+        ocp.solver_options.regularize_method = method
     if levenberg_marquardt:
         ocp.solver_options.levenberg_marquardt = float(levenberg_marquardt)
     # acados defaults to 50, and a KSO knot carries ~230 constraint rows: measured,

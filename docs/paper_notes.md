@@ -4,6 +4,10 @@ Source: **FARO: Feasibility-Aware Robot Motion Optimization**, Michal Ciebielski
 Shafeef Omar, Aaron Johnson, Majid Khadiv. arXiv:2607.18362v1 [cs.RO], 20 Jul 2026.
 TUM MIRMI. CC BY 4.0. Video: https://youtu.be/R6qCHoCormQ
 
+**Re-checked 2026-09-16 against the arXiv v1 PDF.** Reference numbers and notation
+below follow that PDF. Earlier versions of this file used numbers from a different
+rendering; for example, DynaRetarget is **[19]**, not [6].
+
 Everything below is quoted or directly derived from the paper text. Anything
 *inferred* is labelled as such.
 
@@ -20,8 +24,8 @@ own limitations section.
 Confidence: high, but *inferred*. The evidence chain:
 
 1. §IV-A: sequences marked `*` "are additionally executed on the real robot using
-   an RL-based trajectory-tracking controller **[6]**".
-2. **[6]** = Dhedin, Taouil, **Omar**, Yu, Tao, Dai, Khadiv (2026), *DynaRetarget:
+   an RL-based trajectory-tracking controller **[19]**".
+2. **[19]** = Dhedin, Taouil, **Omar**, Yu, Tao, Dai, Khadiv (2026), *DynaRetarget:
    Dynamically-feasible retargeting using sampling-based trajectory optimization*,
    arXiv:2602.06827 — same lab, and shares author Shafeef Omar with FARO.
 3. DynaRetarget states verbatim: *"The dataset contains hundreds of motions of a
@@ -64,19 +68,24 @@ palms. See `ambiguities.md` #7 / #7b.
 | Stage | Paper's solver | Ours |
 |---|---|---|
 | Mode/edge (Eq. 14) | Ipopt | **Ipopt — exact match** |
-| KSO (Eq. 15) | acados SQP | Ipopt (acados optional later) |
-| TO (Eq. 17) | Hippo SQP | Ipopt (Hippo is not open source) |
+| KSO (Eq. 15) | acados SQP | **acados SQP — match** (since Milestone 4) |
+| TO (Eq. 17) | Hippo SQP | Ipopt, planned (Hippo is not open source) |
 
-Expect our KSO/TO **solve times to differ** from Table I: interior-point (Ipopt)
-vs. SQP (acados/Hippo) is an algorithmic difference, not an implementation bug.
+Also from §II-G: **both (15) and (17) use direct multiple shooting**. Our KSO is a
+multi-phase acados OCP with one phase per knot.
+
+Expect our TO **solve times to differ** from Table I, since Ipopt is interior-point
+and Hippo is SQP.
 Compare *feasibility verdicts* and *constraint coverage*, not wall-clock, when
 validating against the paper.
 
 ## 3. Their library stack — identical to ours
 
-Refs [2] **CasADi**, [3] **Pinocchio**, [16] **Coal**, [8] **GJK** (Gilbert-Johnson-Keerthi),
-[18] Schulman et al. (SQP collision handling, basis for the Eq. 9 formulation),
-[12] Lynch & Park *Modern Robotics* (cited for §II-C 3, the dynamics).
+Refs [25] **CasADi**, [24] **Pinocchio**, [22] **Coal**, [21] **GJK** (Gilbert-Johnson-Keerthi),
+[20] Schulman et al. (the signed-distance approximation behind Eq. 9),
+[23] Lynch & Park *Modern Robotics* (object twist–wrench dynamics, Eq. 11b),
+[26] **acados**, [27] **Hippo**, [28] **Ipopt**, [30] smoothed distance functions
+(future work in §V), [31] MotionDisco (higher-level search, future work).
 
 Our stack choice therefore matches the paper's exactly, apart from Hippo.
 
@@ -85,19 +94,30 @@ Our stack choice therefore matches the paper's exactly, apart from Hippo.
 ## 4. Constraint details (§II-C) — for Milestone 2
 
 **All contact interfaces are rectangular planar patches** with patch-to-patch
-unilateral contact. Notation: `p_ij`, `R_ij`, `f_ij`, `m_ij` = relative position,
-rotation, force, moment of patch *i* w.r.t. patch *j*, expressed in frame *j*.
-**Patch normals are aligned with their local z-axes.** `h` = half-extents.
+unilateral contact. Notation (PDF): `p`, `R`, `f`, `κ` = relative position,
+rotation, force, moment of patch *a* w.r.t. patch *b*, expressed in frame *b*.
+**Patch normals are aligned with their local z-axes.** `ξ` = half-extents, and
+`ᵇξₐ` = the half-extents of *a* expressed in frame *b*. The wrench is `λ_e = (f_e, κ_e)`.
 
 - **Eq. 7a** — aligns patch normals via `log(R)` and enforces zero normal
   separation, **leaving relative in-plane position and yaw free**.
-- **Eq. 7b** — keeps patches within the admissible region defined by half-extents.
+- **Eq. 7a** is `log₃(R)_{x,y} = 0, p_z = 0`.
+- **Eq. 7b** — `|p_{x,y}| ≤ (ᵇξ_b)_{x,y} − (ᵇξ_a)_{x,y}`: patch *a* lies inside patch *b*.
 - **Eq. 7c** — unilateral contact + a **pyramidal** (not smooth-cone) approximation
   of Coulomb friction, coefficient μ.
-- **Eq. 7d** — torsional friction (coefficient μ_t) + centre-of-pressure bounds
-  induced by the finite patch size.
+- **Eq. 7d** — torsional friction `|κ_z| ≤ μ_r f_z` + centre-of-pressure bounds
+  `|(κ_x, κ_y)| ≤ f_z ((ᵃξₐ)_y, (ᵃξₐ)_x)`. Note the x↔y swap and the frame-*a* half-extents.
 - **Eq. 8** — no-slip for a sticking contact active across adjacent timesteps,
-  constraining **both in-plane position and in-plane rotation** across timesteps.
+  `(p^{s+1} − p^s)_{x,y} = 0`, `log₃((R^s)ᵀR^{s+1})_z = 0`.
+- **Eq. 9** — `0 ≤ sd_AB(x) ≈ n̂ · (T_A(x) p_A − T_B(x) p_B)`, with witnesses from GJK.
+- **Eq. 10** — backward-Euler integration over `T̄Δt` of q (on the manifold), v and
+  the centroidal momentum h. `ḣ` is gravity plus contact wrenches, and `h = A(q) v`.
+- **Eq. 11** — object backward Euler, `W_ext = G V̇ − [ad_V]ᵀ G V`, with
+  `W_ext = W_env + W_grav + Σ_a W_a`.
+- **Eq. 12** — `τ_j = S(M v̇ + b − Σ J_eᵀ λ_e)`. **Eq. 13a/b** position/velocity
+  limits. **Eq. 13c** `|τ_j| + (τ_max / v_τ,max)|v_j| ≤ τ_max`.
+- **Which constraints each problem uses:** Eq. 14 uses 7a, 7b, 9, 13a. Eq. 15 uses
+  7a, 7b, 8, 9, 13a. Eq. 17 uses all of 7, 8, 9, 10, 11, 13.
 
 Note for Milestone 2: the friction cone is **pyramidal**, which keeps the
 constraint linear in the force variables. Do not substitute a quadratic cone.
@@ -107,7 +127,9 @@ interfaces**" — extending to curved geometry would need differentiable SDFs [7
 
 ## 5. Evaluation setup — for Milestones 5–7
 
-- **TO discretization: 20 optimization knots per mode.**
+- **TO discretization: 20 optimization knots per mode.** Eq. 17 adds one time
+  scale `T̄_s ∈ [T̄_min, T̄_max]` per mode, penalized by `w_T Σ(T̄_s − 1)`. None of
+  `T̄_min`, `T̄_max`, `w_T`, Δt, φ or φ_N is given.
 - Eight human-defined contact sequences: Climb 1/2, Pick Place 1/2, Toss to Table,
   Double Catch, Triple Catch, Juggle. Modes per sequence: 4–11 (avg 8.4).
 - **Table I results:** TO 9.73–117.62 s (avg 64.70); KSO 0.14–1.93 s (avg 0.60).
@@ -116,9 +138,23 @@ interfaces**" — extending to curved geometry would need differentiable SDFs [7
 - **Tree search (§IV-B):** two box-placement task variants, 5 seeds, **2-hour budget**,
   **max depth 5 switches**, **max branching factor 108**. Hard task: TO-only baseline
   expands 12.8 nodes / 0 solutions; with FARO filters 814.6 nodes / 26.4 solutions.
+  Filter variants (Eq. 21): F1=(KSO), F2=(M,E,KSO), F3=(M,E,KSO,TO), F4=(TO).
+  **Table II** (mean over 5 seeds):
+
+  | | Easy KSO | Easy M,E,KSO | Easy M,E,KSO,TO | Easy TO | Hard KSO | Hard M,E,KSO | Hard M,E,KSO,TO | Hard TO |
+  |---|---|---|---|---|---|---|---|---|
+  | solutions | 73.6 | 83.8 | 8.0 | 20.0 | 0.4 | 26.4 | 1.2 | 0.0 |
+  | first sol. [s] | 192 | 194 | 1455 | 951 | 2671 | 2763 | 5399 | n/a |
+  | KSO attempts | 410.6 | 410.0 | 230.8 | 0 | 1660.8 | 1415.0 | 437.4 | 0 |
+  | TO attempts | 182.0 | 176.2 | 223.0 | 208.4 | 5.4 | 79.6 | 164.0 | 216.2 |
+  | tree nodes | 393.8 | 380.8 | 90.6 | 87.8 | 218.2 | 814.6 | 52.8 | 12.8 |
 - **LLM (§IV-C):** **GPT-5.5**, prompted for **100 diverse contact plans** per scene,
   repeated **5×**. KSO used as a classifier of TO feasibility; false-negative rate
-  near zero. Four scenes, each with an easier `-a` and harder `-b` variant.
+  near zero. Figure 5 shows four panels, 1-a, 1-b, 2-a and 2-b: two scenes, each
+  with an easier `-a` and a harder `-b` variant. **Table III:** FNR 0.0 / 0.0 / 1.3 /
+  0.0 %, FPR 24.2 / 4.2 / 41.4 / 19.5 %, speedup 3.8 / 15.5 / 2.4 / 7.4×. The few
+  false negatives are blamed on "poor initialization or insufficient solver
+  iterations in the KSO".
 
 ### Table IV — allowed contact interactions (defines the search space)
 

@@ -74,7 +74,14 @@ solve                   0.17 s
 
 The `.so` is cached under `third_party/acados_generated/`, keyed by a fingerprint of
 everything that affects the generated C — scene, sequence, pair count, collision
-settings, solver options. That key is not optional: keying on too little served a
+settings, solver options.
+
+**Known gap: `q_init` is not in that key.** It is compiled in as `constraints.x0` on
+phase 0, but neither the on-disk fingerprint nor the in-process `_BUILT` dict includes
+it. So a later call on the same sequence with a different `q_init` (another scene
+state, or a restart) reuses a solver that pins the **old** `q_0`. Fix one of two
+ways: add `q_init` to both keys, or stop compiling it in and set stage-0 `lbx`/`ubx`
+at solve time. The second also avoids a rebuild for every new initial state. That key is not optional: keying on too little served a
 solver compiled for a *different* pair set and reported its answer as this one's.
 
 **Do not interrupt a cold build.** Once you see `rendered solver templates
@@ -87,6 +94,17 @@ twelve KSO calls against the paper's 1415. Table I reports 0.14–1.93 s per KSO
 is not compatible with regenerating C per sequence — so the paper must be reusing one
 compiled structure across sequences. Making the mode assignment a *runtime* input
 (constraint bounds set per solve, one solver per horizon length K) is the open item.
+
+## Solver options worth knowing
+
+`build()` defaults: `SQP`, `hessian_approx=EXACT`, `MERIT_BACKTRACKING`,
+`qp_solver_iter_max=500` (acados' default of 50 hits the cap on the third QP),
+`tol=1e-6`, `max_iter=200`. With EXACT the regularization defaults to `CONVEXIFY`.
+It **replaces** the Hessian, so `levenberg_marquardt` has no effect under it: on
+`reach`, results were bit-identical for LM from 0 to 1.0. `regularize_method` (added
+2026-08-09, not yet committed) lets you pick another method so LM can act. Those
+experiments produced 7 extra K=2 builds under `third_party/acados_generated/`. What
+they showed is not recorded.
 
 ## Rejecting a sequence without generating anything
 
@@ -151,7 +169,12 @@ Eq. 15 pins `q_0 = q_init` and Eq. 8 then freezes every persisting contact — s
 *input*: the robot's actual configuration at the root of the tree search. We currently
 synthesize it by solving Eq. 14 on `c_0`, which optimizes toward the nominal pose
 knowing nothing about the box to be grasped later, and `reach` is INFEASIBLE as a
-result — the feet land 521.7 mm from a stance that can reach.
+result. The synthesized stance is far from a stance that can grasp. The session
+notes from 2026-08-05 give **298 mm and 76°**. An earlier version of this line said
+521.7 mm, which is exactly the foot slide from the `con_h_expr_0` bug below and was
+probably copied from there by mistake. Re-measure with `scripts/04_kso_demo.py -s reach --drift`
+before quoting either number. (`scripts/05_qinit_inspect.py`, which showed both
+poses, was deleted in commit `6f97f8d`.)
 
 Note what that does *not* prove: `QP_Solver_Failed` is a local method giving up, not
 a certificate. Filter E proves *a* grasping stance exists; whether one exists with
